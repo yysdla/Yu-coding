@@ -1,0 +1,60 @@
+# ProjectLens-safe Hermes profile fragment
+# Copy / merge into ~/.hermes/config.yaml (or a profile-specific config).
+# Do NOT use the default hermes-feishu full toolset for project groups.
+#
+# Prerequisites:
+#   pip install -e ".[mcp]"   # inside the ProjectLens repo
+#   Adjust command/cwd/python paths for your machine.
+#
+# Hermes naming (verified against hermes-agent-main):
+#   mcp_servers.projectlens  -> toolset mcp-projectlens
+#   tool name                -> mcp__projectlens__projectlens_ask_project
+
+mcp_servers:
+  projectlens:
+    command: "python"
+    # Prefer an absolute python path if Hermes PATH differs from your shell.
+    # command: "C:/Users/Administrator/AppData/Local/Programs/Python/Python312/python.exe"
+    args:
+      - "-m"
+      - "project_lens.integrations.mcp.server"
+    cwd: "C:/Users/Administrator/Desktop/project-lens"
+    # Optional: pass through PROJECT_LENS_* so MCP uses the same registry as API.
+    # env:
+    #   PROJECT_LENS_LOCAL_PROJECT_REGISTRY: "..."
+    tools:
+      include:
+        - projectlens_ask_project
+
+# Feishu must NOT inherit hermes-feishu (terminal/file included).
+# Whitelist only ProjectLens MCP + clarify for clarifying questions.
+platform_toolsets:
+  feishu:
+    - mcp-projectlens
+    - clarify
+  # Optional CLI smoke (same restrictions):
+  cli:
+    - mcp-projectlens
+    - clarify
+
+agent:
+  disabled_toolsets:
+    - terminal
+    - file
+    - code_execution
+    - browser
+    - delegation
+    - memory
+    - skills
+    # Defense in depth: never allow the full Feishu preset name as a toolset source.
+    # (platform_toolsets above already omits hermes-feishu.)
+
+# Route a Feishu project group to this profile.
+# Replace chat_id with the real Feishu chat oc_xxx.
+# Requires gateway.multiplex_profiles / profile routing enabled in your Hermes version.
+profile_routes:
+  - name: projectlens-main
+    platform: feishu
+    chat_id: "oc_REPLACE_WITH_FEISHU_CHAT_ID"
+    profile: projectlens-safe
+    enabled: true

@@ -1,0 +1,17 @@
+{
+  "releases": [
+    {
+      "tenant_id": "demo",
+      "project_id": "payment",
+      "release_id": "REL-2026-07-20",
+      "version": "2026.07.20",
+      "title": "Payment checkout hotfix",
+      "summary": "latest release restores coupon null guard and checkout regression coverage after INC-2026-001.",
+      "released_at": "2026-07-20T14:00:00+00:00",
+      "access_scope": "project:payment:read",
+      "service": "order-service",
+      "commit_shas": ["a1b2c3d4e5f60718293a4b5c6d7e8f90"],
+      "url": "https://releases.example/REL-2026-07-20"
+    }
+  ]
+}

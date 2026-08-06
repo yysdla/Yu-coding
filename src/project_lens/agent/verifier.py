@@ -1,0 +1,97 @@
+"""Verify AnswerDraft into ProjectAnswer — no uncited facts."""
+
+from __future__ import annotations
+
+from project_lens.agent.draft import AnswerDraft, parse_citation_id
+from project_lens.agent.read_tools import InvestigationLedger
+from project_lens.domain.models import (
+    ActionProposal,
+    Claim,
+    ClaimType,
+    EvidenceGrade,
+    ProjectAnswer,
+    ProjectRef,
+)
+
+
+def verify_answer_draft(
+    draft: AnswerDraft,
+    *,
+    project: ProjectRef,
+    ledger: InvestigationLedger,
+) -> ProjectAnswer:
+    evidence = ledger.all_evidence()
+    evidence_ids = {item.id for item in evidence}
+    claims: list[Claim] = []
+    unknowns = list(draft.unknowns)
+
+    for fact in draft.facts:
+        cited = []
+        for raw in fact.citations:
+            eid = parse_citation_id(raw)
+            if eid is not None and eid in evidence_ids:
+                cited.append(eid)
+        if cited:
+            claims.append(
+                Claim(
+                    text=fact.text,
+                    type=ClaimType.FACT,
+                    evidence_ids=tuple(cited),
+                    grade=EvidenceGrade.B,
+                )
+            )
+        else:
+            # Uncited "fact" must not stay FACT — demote to unknown/hypothesis.
+            unknowns.append(f"未通过引用校验的候选结论：{fact.text[:160]}")
+
+    for text in draft.inferences:
+        claims.append(
+            Claim(
+                text=text,
+                type=ClaimType.INFERENCE,
+                evidence_ids=(),
+                grade=EvidenceGrade.C,
+            )
+        )
+
+    if not claims and not unknowns:
+        unknowns.append("调查结束，但没有形成可展示的结论；请补充资料或更具体的文件路径。")
+
+    actions = tuple(
+        ActionProposal(title=item[:200], description=item, requires_approval=True)
+        for item in draft.next_actions[:5]
+    )
+
+    business = draft.business_summary.strip()
+    if not business:
+        if claims:
+            business = claims[0].text
+        elif unknowns:
+            business = (
+                "当前资料不足以形成带引用结论。"
+                f"已使用工具：{', '.join(draft.tools_used) or '无'}。"
+            )
+        else:
+            business = "调查完成，暂无结论。"
+
+    technical = draft.technical_summary.strip() or (
+        f"read_agent tools={list(draft.tools_used)}; "
+        f"evidence={len(evidence)}; facts={sum(1 for c in claims if c.type == ClaimType.FACT)}"
+    )
+
+    # Keep only evidence referenced by claims (plus a small buffer of tool evidence).
+    used_ids = {eid for claim in claims for eid in claim.evidence_ids}
+    kept = tuple(item for item in evidence if item.id in used_ids) or evidence[:6]
+
+    return ProjectAnswer(
+        project=project,
+        status="identified" if any(c.type == ClaimType.FACT for c in claims) else "unknown",
+        skill="project_investigation",
+        confidence=0.7 if any(c.type == ClaimType.FACT for c in claims) else 0.25,
+        business_summary=business,
+        technical_summary=technical,
+        claims=tuple(claims),
+        evidence=kept,
+        recommended_actions=actions,
+        unknowns=tuple(dict.fromkeys(unknowns))[:8],
+    )

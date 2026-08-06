@@ -1,0 +1,88 @@
+{
+  "tenant_id": "demo",
+  "project_id": "projectlens",
+  "display_name": "ProjectLens",
+  "repositories": [
+    {
+      "name": "project-lens",
+      "path": ".",
+      "default_branch": "main"
+    }
+  ],
+  "services": ["project-lens-api"],
+  "environments": ["local"],
+  "documents_root": "knowledge",
+  "access_scope": "project:projectlens:read",
+  "file_allowlist": [
+    "src/",
+    "docs/",
+    "tests/",
+    "config/",
+    "knowledge/"
+  ],
+  "graph_namespace": "demo:projectlens",
+  "memory_namespace": "demo:projectlens",
+  "default_skill_guides": ["project_intro"],
+  "role_policies": [
+    {
+      "actor_id": "u1",
+      "role": "developer",
+      "readable_sources": ["src/", "docs/", "tests/", "config/", "knowledge/"],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ],
+      "forbidden_sources": ["secrets/", ".env", "*.db"],
+      "answer_depth": "detailed",
+      "answer_style": "technical",
+      "visibility_level": "team_shared"
+    },
+    {
+      "actor_id": "hermes-user",
+      "role": "developer",
+      "readable_sources": ["src/", "docs/", "tests/", "config/", "knowledge/"],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ],
+      "forbidden_sources": ["secrets/", ".env", "*.db"],
+      "answer_depth": "detailed",
+      "answer_style": "technical",
+      "visibility_level": "team_shared"
+    }
+  ],
+  "chat_visibility_policies": [
+    {
+      "chat_id": "chat-1",
+      "visibility_level": "team_shared",
+      "allowed_roles": ["developer", "qa", "guest", "manager"],
+      "readable_sources": ["src/", "docs/", "tests/", "config/", "knowledge/"],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ]
+    },
+    {
+      "chat_id": "hermes-chat",
+      "visibility_level": "team_shared",
+      "allowed_roles": ["developer", "qa", "guest", "manager"],
+      "readable_sources": ["src/", "docs/", "tests/", "config/", "knowledge/"],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ]
+    }
+  ]
+}

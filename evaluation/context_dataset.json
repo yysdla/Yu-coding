@@ -1,0 +1,52 @@
+[
+  {
+    "id": "traceback-location",
+    "query": "Traceback (most recent call last):\n  File \"src/order_service.py\", line 14, in create_order\n    coupon_id = request.coupon.id\nAttributeError: 'NoneType' object has no attribute 'id'",
+    "relevant_sources": ["order_service.py#L14-L20"]
+  },
+  {
+    "id": "optional-coupon-rule",
+    "query": "Are coupons optional when creating an order?",
+    "relevant_sources": ["architecture.md#chunk-0"]
+  },
+  {
+    "id": "checkout-runbook",
+    "query": "How should we investigate checkout HTTP 500 after a release?",
+    "relevant_sources": ["runbook.md#chunk-0"]
+  },
+  {
+    "id": "historical-incident",
+    "query": "Have orders without coupons failed before?",
+    "relevant_sources": ["INC-2026-001"]
+  },
+  {
+    "id": "null-guard-resolution",
+    "query": "restore null guard and add no-coupon regression test",
+    "relevant_sources": ["INC-2026-001", "runbook.md#chunk-0"]
+  },
+  {
+    "id": "entry-point",
+    "query": "Which function is the entry point for order creation?",
+    "relevant_sources": ["order_service.py#L14-L20", "architecture.md#chunk-0"]
+  },
+  {
+    "id": "business-impact",
+    "query": "Does an order service failure affect product browsing?",
+    "relevant_sources": ["architecture.md#chunk-0"]
+  },
+  {
+    "id": "release-check",
+    "query": "Confirm whether the latest release changed optional request fields",
+    "relevant_sources": ["runbook.md#chunk-0"]
+  },
+  {
+    "id": "code-expression",
+    "query": "Where is request.coupon.id assigned to coupon_id?",
+    "relevant_sources": ["order_service.py#L14-L20"]
+  },
+  {
+    "id": "incident-impact",
+    "query": "Which customers were affected by the missing coupon null guard?",
+    "relevant_sources": ["INC-2026-001"]
+  }
+]

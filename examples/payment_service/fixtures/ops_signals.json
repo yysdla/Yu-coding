@@ -1,0 +1,42 @@
+{
+  "signals": [
+    {
+      "tenant_id": "demo",
+      "project_id": "payment",
+      "kind": "log",
+      "environment": "production",
+      "service": "order-service",
+      "observed_at": "2026-07-20T10:14:30+00:00",
+      "access_scope": "project:payment:read",
+      "level": "error",
+      "message": "AttributeError: 'NoneType' object has no attribute 'id' in create_order during checkout",
+      "trace_id": "tr_checkout_500",
+      "labels": {"route": "/orders", "http_status": "500"}
+    },
+    {
+      "tenant_id": "demo",
+      "project_id": "payment",
+      "kind": "metric",
+      "environment": "production",
+      "service": "order-service",
+      "observed_at": "2026-07-20T10:15:00+00:00",
+      "access_scope": "project:payment:read",
+      "name": "http_5xx_rate",
+      "value": 0.42,
+      "summary": "http_5xx_rate rose to 0.42 during checkout failures",
+      "labels": {"route": "/orders"}
+    },
+    {
+      "tenant_id": "demo",
+      "project_id": "payment",
+      "kind": "trace",
+      "environment": "production",
+      "service": "order-service",
+      "observed_at": "2026-07-20T10:14:45+00:00",
+      "access_scope": "project:payment:read",
+      "trace_id": "tr_checkout_500",
+      "summary": "trace failed at coupon.id access inside create_order span",
+      "labels": {"span": "create_order"}
+    }
+  ]
+}

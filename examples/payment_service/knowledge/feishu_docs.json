@@ -1,0 +1,28 @@
+{
+  "documents": [
+    {
+      "tenant_id": "demo",
+      "project_id": "payment",
+      "doc_token": "docx_payment_owners",
+      "doc_url": "https://feishu.example/docx/docx_payment_owners",
+      "title": "Payment service ownership",
+      "content": "order-service owner is Ada. payment service depends on coupon data. Decision: keep optional coupon handling with a null guard.",
+      "revision": "r3",
+      "updated_at": "2026-07-21T09:00:00+00:00",
+      "owner_user_id": "ou_ada",
+      "access_scope": "project:payment:read"
+    },
+    {
+      "tenant_id": "demo",
+      "project_id": "payment",
+      "doc_token": "docx_payment_decision",
+      "doc_url": "https://feishu.example/docx/docx_payment_decision",
+      "title": "Checkout coupon decision record",
+      "content": "ADR decision: requests without coupon must still create orders and store a null coupon identifier.",
+      "revision": "r1",
+      "updated_at": "2026-07-18T08:00:00+00:00",
+      "owner_user_id": "ou_ada",
+      "access_scope": "project:payment:read"
+    }
+  ]
+}

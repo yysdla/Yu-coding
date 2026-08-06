@@ -1,0 +1,11 @@
+{
+  "dependencies": [
+    {
+      "from_service": "order-service",
+      "to_service": "payment-service",
+      "relation": "depends_on",
+      "summary": "order-service creates the order and forwards the payment request to payment-service.",
+      "access_scope": "project:payment:read"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "tasks": [
+    {
+      "tenant_id": "demo",
+      "project_id": "payment",
+      "task_id": "TASK-2048",
+      "title": "Restore coupon null guard",
+      "summary": "Track incident INC-2026-001, restore the coupon null guard, and add a no-coupon checkout regression test before the hotfix release.",
+      "status": "done",
+      "updated_at": "2026-07-20T12:30:00+00:00",
+      "access_scope": "project:payment:read",
+      "service": "order-service",
+      "assignee": "Ada",
+      "related_incident_id": "INC-2026-001",
+      "related_commit_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "url": "https://tasks.example/TASK-2048"
+    }
+  ]
+}

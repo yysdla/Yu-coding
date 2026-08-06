@@ -1,0 +1,20 @@
+{
+  "tenant_id": "demo",
+  "project_id": "payment",
+  "display_name": "Payment Demo (fixture)",
+  "repositories": [
+    {
+      "name": "payment_service",
+      "path": "examples/payment_service",
+      "default_branch": "main"
+    }
+  ],
+  "services": ["order-service"],
+  "environments": ["production"],
+  "documents_root": "examples/payment_service/knowledge",
+  "access_scope": "project:payment:read",
+  "file_allowlist": ["src/", "tests/", "knowledge/"],
+  "graph_namespace": "demo:payment",
+  "memory_namespace": "demo:payment",
+  "default_skill_guides": ["project_intro", "incident"]
+}

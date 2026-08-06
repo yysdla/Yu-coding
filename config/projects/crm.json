@@ -1,0 +1,20 @@
+{
+  "tenant_id": "demo",
+  "project_id": "crm",
+  "display_name": "CRM Demo (fixture)",
+  "repositories": [
+    {
+      "name": "crm_service",
+      "path": "examples/crm_service",
+      "default_branch": "main"
+    }
+  ],
+  "services": ["contact-service"],
+  "environments": ["production"],
+  "documents_root": "examples/crm_service/knowledge",
+  "access_scope": "project:crm:read",
+  "file_allowlist": ["src/", "tests/", "knowledge/"],
+  "graph_namespace": "demo:crm",
+  "memory_namespace": "demo:crm",
+  "default_skill_guides": ["project_intro"]
+}

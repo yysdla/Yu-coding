@@ -1,0 +1,7 @@
+a1b2c3d4e5f60718293a4b5c6d7e8f90Ada2026-07-19T16:30:00+00:009090909090909090909090909090909090909090restore coupon null guardAvoid AttributeError when coupon is missing.
+src/order_service.py
+tests/test_order_service.py
+
+f0e1d2c3b4a5968778695a4b3c2d1e0fAda2026-07-18T11:00:00+00:008080808080808080808080808080808080808080refactor create_order coupon pathPrepare optional coupon handling.
+src/order_service.py
+

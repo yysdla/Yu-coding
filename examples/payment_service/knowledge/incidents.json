@@ -1,0 +1,14 @@
+[
+  {
+    "id": "INC-2026-001",
+    "title": "Orders without coupons failed during checkout",
+    "summary": "The order API returned HTTP 500 for requests without a coupon.",
+    "root_cause": "The coupon null guard was removed during a refactor.",
+    "resolution": "Restore the null guard and add a no-coupon regression test.",
+    "impact": "Checkout failed for customers who did not select a coupon.",
+    "service": "order-service",
+    "related_commit_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "occurred_at": "2026-07-20T10:15:00+00:00"
+  }
+]
+

@@ -1,0 +1,9 @@
+name: projectlens
+version: 0.1.0
+description: Thin Hermes slash-command bridge to ProjectLens read-only project agent.
+entrypoint: project_lens.integrations.hermes_plugin
+commands:
+  - project
+  - project-map
+  - project-gaps
+  - project-role
