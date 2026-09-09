@@ -4,6 +4,8 @@
 
 飞书群聊是 ProjectLens 的工作现场。Hermes 负责消息接入、意图与工具循环；ProjectLens 负责 ProjectSpace 绑定、权限交集、证据检索与回答校验。
 
+**新人从零联调请先看：** [`feishu-test-quickstart.md`](feishu-test-quickstart.md)
+
 相关文档：
 
 - 产品总纲：[`projectlens-product-document.md`](projectlens-product-document.md)

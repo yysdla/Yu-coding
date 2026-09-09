@@ -84,6 +84,8 @@ POST /api/v1/feishu/events
 
 默认生产决策路径为 `PROJECT_LENS_AGENT_MODE=hermes`。可执行配置剖面见 [`docs/pilot-launch-config.md`](docs/pilot-launch-config.md)。
 
+**想在飞书群里测试？** 按 [`docs/feishu-test-quickstart.md`](docs/feishu-test-quickstart.md) 配置飞书应用、`.env`、群绑定并完成冒烟提问。
+
 ## 项目接入
 
 更换项目应更换 **ProjectSpace** 配置，而不是修改 Agent 逻辑。
@@ -101,7 +103,8 @@ POST /api/v1/feishu/events
 | 文档 | 用途 |
 |------|------|
 | [`docs/projectlens-product-document.md`](docs/projectlens-product-document.md) | 产品总纲（唯一产品真相） |
-| [`docs/feishu-setup.md`](docs/feishu-setup.md) | 飞书联调 |
+| [`docs/feishu-test-quickstart.md`](docs/feishu-test-quickstart.md) | 飞书测试快速上手（新人） |
+| [`docs/feishu-setup.md`](docs/feishu-setup.md) | 飞书联调清单 |
 | [`docs/pilot-launch-config.md`](docs/pilot-launch-config.md) | Stub / Safe Live / 测试群配置 |
 | [`docs/projectspace-onboarding-guide.md`](docs/projectspace-onboarding-guide.md) | 新项目接入 |
 

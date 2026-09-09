@@ -9,6 +9,7 @@
 | 文档 | 用途 |
 |------|------|
 | [`projectlens-product-document.md`](projectlens-product-document.md) | 产品定义、目标/非目标、概念、MVP、路线图 |
+| [`feishu-test-quickstart.md`](feishu-test-quickstart.md) | **新人飞书测试**：要配什么、怎么配、怎么冒烟 |
 | [`feishu-setup.md`](feishu-setup.md) | 飞书应用、事件回调、权限与联调检查 |
 | [`pilot-launch-config.md`](pilot-launch-config.md) | `.env` 配置剖面（Stub / Safe Live / 测试群） |
 | [`projectspace-onboarding-guide.md`](projectspace-onboarding-guide.md) | 新项目 ProjectSpace 接入 |
@@ -40,5 +41,6 @@
 
 1. [`projectlens-product-document.md`](projectlens-product-document.md) — 理解产品边界
 2. 仓库根目录 [`README.md`](../README.md) — 快速开始
-3. [`pilot-launch-config.md`](pilot-launch-config.md) + [`feishu-setup.md`](feishu-setup.md) — 跑通环境
-4. [`projectspace-onboarding-guide.md`](projectspace-onboarding-guide.md) — 接入真实项目
+3. [`feishu-test-quickstart.md`](feishu-test-quickstart.md) — 飞书群联调（新人优先）
+4. [`pilot-launch-config.md`](pilot-launch-config.md) + [`feishu-setup.md`](feishu-setup.md) — 配置细表
+5. [`projectspace-onboarding-guide.md`](projectspace-onboarding-guide.md) — 接入真实项目
