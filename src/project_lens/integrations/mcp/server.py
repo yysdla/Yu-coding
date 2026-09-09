@@ -9,6 +9,9 @@ import json
 import sys
 from typing import Any, Callable
 
+from project_lens.config import settings
+from project_lens.domain.identity import ActorContext
+
 from project_lens.integrations.mcp.handler import (
     FORMAL_TOOL_NAMES,
     TOOL_DESCRIPTION,
@@ -33,9 +36,13 @@ def _require_mcp() -> Any:
     return FastMCP
 
 
+McpActorResolver = Callable[[], ActorContext | None]
+
+
 def create_mcp_server(
     ask_service: Any | None = None,
     tool_service: Any | None = None,
+    actor_resolver: McpActorResolver | None = None,
 ) -> Any:
     """Build a FastMCP server bound to ProjectAgent tool + ask services."""
 
@@ -55,7 +62,7 @@ def create_mcp_server(
         raise RuntimeError("ProjectAgentToolService.list_tools() returned invalid catalog")
 
     formal_names = {item["name"] for item in tools if isinstance(item, dict) and "name" in item}
-    if formal_names != set(FORMAL_TOOL_NAMES):
+    if not set(FORMAL_TOOL_NAMES).issubset(formal_names):
         raise RuntimeError(
             f"MCP formal tool catalog mismatch: got {sorted(formal_names)}, "
             f"expected {sorted(FORMAL_TOOL_NAMES)}"
@@ -64,10 +71,16 @@ def create_mcp_server(
         if item.get("allow_apply") is not False:
             raise RuntimeError(f"MCP tool {item.get('name')} must keep allow_apply=false")
 
+    resolved_actor = actor_resolver or _configured_mcp_actor
     mcp = FastMCP("projectlens")
 
     for spec in tools:
-        _register_formal_tool(mcp, tool_service=tool_service, spec=spec)
+        _register_formal_tool(
+            mcp,
+            tool_service=tool_service,
+            spec=spec,
+            actor_resolver=resolved_actor,
+        )
 
     @mcp.tool(
         name=TOOL_NAME,
@@ -91,13 +104,20 @@ def create_mcp_server(
             channel_id=channel_id,
             audience=audience,
             format=format,
+            actor=resolved_actor(),
         )
         return json.dumps(result, ensure_ascii=False)
 
     return mcp
 
 
-def _register_formal_tool(mcp: Any, *, tool_service: Any, spec: dict[str, Any]) -> None:
+def _register_formal_tool(
+    mcp: Any,
+    *,
+    tool_service: Any,
+    spec: dict[str, Any],
+    actor_resolver: McpActorResolver,
+) -> None:
     tool_name = str(spec["name"])
     description = str(spec.get("description") or tool_name)
 
@@ -116,6 +136,7 @@ def _register_formal_tool(mcp: Any, *, tool_service: Any, spec: dict[str, Any]) 
             user_id=user_id,
             chat_id=chat_id,
             arguments=arguments or {},
+            actor=actor_resolver(),
         )
         return json.dumps(result, ensure_ascii=False)
 
@@ -123,6 +144,25 @@ def _register_formal_tool(mcp: Any, *, tool_service: Any, spec: dict[str, Any]) 
     _handler.__qualname__ = tool_name
     decorator: Callable[..., Any] = mcp.tool(name=tool_name, description=description)
     decorator(_handler)
+
+
+def _configured_mcp_actor() -> ActorContext | None:
+    tenant_id = (settings.mcp_trusted_tenant_id or "").strip()
+    actor_id = (settings.mcp_trusted_actor_id or "").strip()
+    chat_id = (settings.mcp_trusted_chat_id or "").strip()
+    chat_type = settings.mcp_trusted_chat_type.strip().lower()
+    if not tenant_id or not actor_id or not chat_id:
+        return None
+    if chat_type not in {"p2p", "group"}:
+        return None
+    return ActorContext(
+        tenant_key=tenant_id,
+        actor_id=actor_id,
+        chat_id=chat_id,
+        chat_type=chat_type,  # type: ignore[arg-type]
+        source="service_token",
+        authenticated=True,
+    )
 
 
 def main() -> None:

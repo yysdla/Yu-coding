@@ -14,7 +14,43 @@
   "documents_root": "examples/payment_service/knowledge",
   "access_scope": "project:payment:read",
   "file_allowlist": ["src/", "tests/", "knowledge/"],
+  "public_sources": ["knowledge/"],
+  "rag_namespace": "demo:payment:rag",
   "graph_namespace": "demo:payment",
   "memory_namespace": "demo:payment",
-  "default_skill_guides": ["project_intro", "incident"]
+  "source_connectors": [
+    {
+      "kind": "repo",
+      "name": "payment_service",
+      "path": "examples/payment_service"
+    },
+    {
+      "kind": "documents",
+      "name": "payment_knowledge",
+      "path": "examples/payment_service/knowledge",
+      "namespace": "demo:payment:rag"
+    },
+    {
+      "kind": "feishu_docs",
+      "name": "payment_feishu_docs",
+      "namespace": "demo:payment:rag"
+    }
+  ],
+  "feishu_chat_bindings": [
+    {
+      "tenant_key": "feishu-demo",
+      "chat_id": "oc_payment",
+      "visibility": "team_shared"
+    }
+  ],
+  "default_skill_guides": ["project_intro", "incident"],
+  "members": [
+    {"actor_id": "u1", "roles": ["developer"]},
+    {"actor_id": "u_dev", "roles": ["developer"]},
+    {"actor_id": "u_product", "roles": ["product"]},
+    {"actor_id": "u_qa", "roles": ["qa"]},
+    {"actor_id": "u_manager", "roles": ["manager"]},
+    {"actor_id": "u_ops", "roles": ["ops"]},
+    {"actor_id": "u-shared-1", "roles": ["developer"]}
+  ]
 }

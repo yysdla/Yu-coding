@@ -45,7 +45,7 @@ def main() -> None:
     signing_secret = env.get("PROJECT_LENS_FEISHU_SIGNING_SECRET") or ""
     bindings = json.loads(env["PROJECT_LENS_FEISHU_PROJECT_BINDINGS"])
     binding = bindings["bindings"][0]
-    event_id = f"grey-read-agent-{uuid.uuid4().hex[:12]}"
+    event_id = f"grey-hermes-{uuid.uuid4().hex[:12]}"
     text = args.question
     payload = {
         "schema": "2.0",
@@ -56,7 +56,8 @@ def main() -> None:
             "tenant_key": binding["tenant_key"],
         },
         "event": {
-            "sender": {"sender_id": {"user_id": "grey-test-user"}},
+            # Current Feishu ingress requires the trusted open_id field.
+            "sender": {"sender_id": {"open_id": "u1"}},
             "message": {
                 "message_id": f"msg-{event_id}",
                 "chat_id": binding["chat_id"],

@@ -8,7 +8,18 @@ from typing import Any
 
 from project_lens.context.bootstrap import LocalProjectRegistration
 from project_lens.domain.models import ProjectRef
-from project_lens.project_space.models import ProjectSpace, RepositoryRef
+from project_lens.project_space.models import (
+    FeishuChatBindingRef,
+    ProjectSpace,
+    RepositoryRef,
+    SourceConnectorRef,
+)
+from project_lens.project_space.member_directory import (
+    ProjectMember,
+    merge_role_policies,
+    primary_role,
+    role_template_policy,
+)
 from project_lens.project_space.policies import (
     AnswerDepth,
     ChatVisibilityPolicy,
@@ -71,6 +82,7 @@ def space_from_local_registration(registration: LocalProjectRegistration) -> Pro
             (registration.project.environment,) if registration.project.environment else ()
         ),
         graph_namespace=f"{registration.project.tenant_id}:{registration.project.project_id}",
+        rag_namespace=f"{registration.project.tenant_id}:{registration.project.project_id}:rag",
         memory_namespace=f"{registration.project.tenant_id}:{registration.project.project_id}",
         access_scope=registration.access_scope,
         documents_root=registration.sources.documents_root,
@@ -117,12 +129,39 @@ def load_project_space_json(path: Path, *, base_dir: Path) -> ProjectSpace:
         )
     docs = payload.get("documents_root")
     allowlist = payload.get("file_allowlist") or ["src/", "tests/", "knowledge/"]
-    role_policies = tuple(
+    public_sources = tuple(str(item) for item in (payload.get("public_sources") or ()))
+    members = tuple(
+        _load_member(item) for item in (payload.get("members") or ())
+    )
+    explicit_role_policies = tuple(
         _load_role_policy(item, project=project) for item in (payload.get("role_policies") or ())
+    )
+    member_role_policies = tuple(
+        role_template_policy(
+            actor_id=member.actor_id,
+            project=project,
+            role=primary_role(member.roles) or RoleKind.GUEST,
+            file_allowlist=tuple(str(item) for item in allowlist),
+            public_sources=public_sources,
+        )
+        for member in members
+        if primary_role(member.roles) is not None
+    )
+    role_policies = merge_role_policies(
+        from_members=member_role_policies,
+        explicit=explicit_role_policies,
     )
     chat_visibility_policies = tuple(
         _load_chat_visibility_policy(item, project=project)
         for item in (payload.get("chat_visibility_policies") or ())
+    )
+    source_connectors = tuple(
+        _load_source_connector(item, base_dir=base_dir)
+        for item in (payload.get("source_connectors") or ())
+    )
+    feishu_chat_bindings = tuple(
+        _load_feishu_chat_binding(item)
+        for item in (payload.get("feishu_chat_bindings") or ())
     )
     return ProjectSpace(
         tenant_id=tenant_id,
@@ -131,27 +170,74 @@ def load_project_space_json(path: Path, *, base_dir: Path) -> ProjectSpace:
         repositories=tuple(repos),
         services=services,
         environments=environments,
-        graph_namespace=str(
-            payload.get("graph_namespace")
-            or f"{payload['tenant_id']}:{payload['project_id']}"
+        rag_namespace=_namespace_or_default(
+            payload,
+            "rag_namespace",
+            f"{payload['tenant_id']}:{payload['project_id']}:rag",
         ),
-        memory_namespace=str(
-            payload.get("memory_namespace")
-            or f"{payload['tenant_id']}:{payload['project_id']}"
+        graph_namespace=_namespace_or_default(
+            payload,
+            "graph_namespace",
+            f"{payload['tenant_id']}:{payload['project_id']}",
+        ),
+        memory_namespace=_namespace_or_default(
+            payload,
+            "memory_namespace",
+            f"{payload['tenant_id']}:{payload['project_id']}",
         ),
         access_scope=str(
             payload.get("access_scope") or f"project:{payload['project_id']}:read"
         ),
         file_allowlist=tuple(str(item) for item in allowlist),
+        public_sources=public_sources,
         default_skill_guides=tuple(
             str(item) for item in (payload.get("default_skill_guides") or ())
         ),
+        members=members,
         role_policies=role_policies,
         chat_visibility_policies=chat_visibility_policies,
         documents_root=(
             _resolve_path(str(docs), base_dir=base_dir) if docs else None
         ),
+        source_connectors=source_connectors,
+        feishu_chat_bindings=feishu_chat_bindings,
     )
+
+
+def _load_source_connector(
+    payload: dict[str, Any],
+    *,
+    base_dir: Path,
+) -> SourceConnectorRef:
+    raw_path = payload.get("path")
+    metadata = dict(payload.get("metadata") or {})
+    records_path = metadata.get("records_path")
+    if records_path:
+        metadata["records_path"] = str(_resolve_path(str(records_path), base_dir=base_dir))
+    return SourceConnectorRef(
+        kind=str(payload["kind"]),
+        name=str(payload.get("name") or payload["kind"]),
+        path=(_resolve_path(str(raw_path), base_dir=base_dir) if raw_path else None),
+        namespace=str(payload.get("namespace") or ""),
+        metadata=metadata,
+    )
+
+
+def _load_feishu_chat_binding(payload: dict[str, Any]) -> FeishuChatBindingRef:
+    return FeishuChatBindingRef(
+        tenant_key=str(payload["tenant_key"]),
+        chat_id=str(payload["chat_id"]),
+        visibility=str(payload.get("visibility") or "team_shared"),
+    )
+
+
+def _load_member(payload: dict[str, Any]) -> ProjectMember:
+    actor_id = str(payload["actor_id"])
+    raw_roles = payload.get("roles") or ()
+    if not isinstance(raw_roles, list) or not raw_roles:
+        raise ValueError(f"member {actor_id} must declare at least one role")
+    roles = tuple(RoleKind(str(item)) for item in raw_roles)
+    return ProjectMember(actor_id=actor_id, roles=roles)
 
 
 def _load_role_policy(
@@ -184,9 +270,12 @@ def _load_chat_visibility_policy(
         RoleKind(str(item)) for item in (payload.get("allowed_roles") or ())
     )
     raw_depth = payload.get("answer_depth")
+    raw_chat_type = str(payload.get("chat_type") or "group")
+    chat_type = raw_chat_type if raw_chat_type in {"p2p", "group"} else "group"
     return ChatVisibilityPolicy(
         chat_id=str(payload["chat_id"]),
         project=project,
+        chat_type=chat_type,  # type: ignore[arg-type]
         visibility_level=VisibilityLevel(
             str(payload.get("visibility_level") or VisibilityLevel.TEAM_SHARED.value)
         ),
@@ -200,6 +289,9 @@ def _load_chat_visibility_policy(
         answer_style=(
             str(payload["answer_style"]) if payload.get("answer_style") is not None else None
         ),
+        allow_private_details=bool(payload.get("allow_private_details", False)),
+        public_sources=tuple(str(item) for item in (payload.get("public_sources") or ())),
+        policy_version=str(payload.get("policy_version") or "v1"),
     )
 
 
@@ -208,3 +300,13 @@ def _resolve_path(raw: str, *, base_dir: Path) -> Path:
     if path.is_absolute():
         return path
     return (base_dir / path).resolve()
+
+
+def _namespace_or_default(
+    payload: dict[str, Any],
+    key: str,
+    default: str,
+) -> str:
+    if key not in payload:
+        return default
+    return str(payload[key])

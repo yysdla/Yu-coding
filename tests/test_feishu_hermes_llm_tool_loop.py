@@ -1,20 +1,29 @@
-"""Phase 3.1: FeishuHermesToolLoopBridge uses HermesLoopRunner, not rule _plan()."""
+"""Phase 3.1/3.2: HermesLoopRunner bridge + durable tool-trace audit."""
 
 from __future__ import annotations
 
 import inspect
+import sys
+from types import ModuleType
+from uuid import UUID
 
 import pytest
 
 from project_lens.domain.models import ProjectRef
 from project_lens.integrations.feishu import hermes_tool_loop as hermes_tool_loop_mod
 from project_lens.integrations.feishu.hermes_loop_runner import (
+    HermesAIAgentLoopRunner,
     HermesLoopRunResult,
     HermesLoopToolCall,
     extract_tool_calls_from_messages,
 )
-from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopBridge
+from project_lens.integrations.feishu.hermes_tool_loop import (
+    FeishuHermesToolLoopBridge,
+    hermes_loop_scratchpad_entry,
+)
 from project_lens.integrations.hermes_plugin.config import ProjectLensPluginConfig
+from project_lens.runtime.events import InMemoryEventSink
+from project_lens.runtime.lifecycle import LifecycleBus, LifecycleEventType
 
 
 class _FakeToolService:
@@ -77,7 +86,14 @@ class _FakeRunnerSelectingAuthorizedEvidence:
 
 
 class _FakeUnavailableRunner:
-    def run(self, *, question: str, project: ProjectRef, user_id: str, chat_id: str) -> HermesLoopRunResult:
+    def run(
+        self,
+        *,
+        question: str,
+        project: ProjectRef,
+        user_id: str,
+        chat_id: str,
+    ) -> HermesLoopRunResult:
         del question, project, user_id, chat_id
         return HermesLoopRunResult(
             final_response="",
@@ -95,11 +111,14 @@ async def test_bridge_uses_injected_runner_not_rule_plan() -> None:
     assert "_needs_graph" not in source
     assert "_FILE_PATH_RE" not in source
 
+    sink = InMemoryEventSink()
+    bus = LifecycleBus(event_sink=sink)
     fake = _FakeRunnerSelectingAuthorizedEvidence()
     bridge = FeishuHermesToolLoopBridge(
         tool_service=_FakeToolService(),  # type: ignore[arg-type]
         config=ProjectLensPluginConfig(),
         loop_runner=fake,
+        lifecycle=bus,
     )
     # Old rule planner would choose search_context + read_project_file for this text.
     question = "order_service.py create_order coupon relation?"
@@ -125,17 +144,39 @@ async def test_bridge_uses_injected_runner_not_rule_plan() -> None:
     assert envelope["tool_calls"][0]["name"] == "projectlens_authorized_evidence"
     assert envelope["audit_ref"]["allow_apply"] is False
     assert envelope["audit_ref"]["mode"] == "feishu_hermes_llm_tool_loop"
+    assert envelope["audit_ref"]["loop_id"]
+    assert envelope["audit_ref"]["trace_id"]
+    assert result.loop_id is not None
+    assert result.trace_id is not None
     assert "authorized_evidence" in envelope["answer_summary"] or "authorized" in envelope[
         "answer_summary"
     ].casefold()
 
+    loop_events = bus.for_run(result.loop_id)
+    types = [event.type for event in loop_events]
+    assert LifecycleEventType.TOOL_REQUESTED in types
+    assert LifecycleEventType.TOOL_COMPLETED in types
+    assert LifecycleEventType.ANSWER_COMPOSED in types
+    durable = sink.for_run(result.loop_id)
+    assert durable
+    assert any(event.type.value == "tool_started" for event in durable)
+    assert any(event.type.value == "tool_completed" for event in durable)
+    assert all(
+        event.payload.get("allow_apply") is False
+        for event in durable
+        if "allow_apply" in event.payload
+    )
+
 
 @pytest.mark.asyncio
 async def test_bridge_reports_explicit_unavailable_without_rule_fallback() -> None:
+    sink = InMemoryEventSink()
+    bus = LifecycleBus(event_sink=sink)
     bridge = FeishuHermesToolLoopBridge(
         tool_service=_FakeToolService(),  # type: ignore[arg-type]
         config=ProjectLensPluginConfig(),
         loop_runner=_FakeUnavailableRunner(),
+        lifecycle=bus,
     )
     result = await bridge.answer(
         project=ProjectRef(tenant_id="demo", project_id="payment"),
@@ -147,9 +188,33 @@ async def test_bridge_reports_explicit_unavailable_without_rule_fallback() -> No
     assert result.envelope["ok"] is False
     assert result.envelope["audit_ref"]["allow_apply"] is False
     assert result.envelope["audit_ref"]["hermes_ok"] is False
+    assert result.envelope["audit_ref"]["loop_id"]
     assert "Hermes" in result.envelope["answer_summary"]
     assert "missing API key" in " ".join(result.envelope["unknowns"])
     assert bridge.last_tool_names == ()
+    assert result.loop_id is not None
+    # Still emits bookend lifecycle even when no tools ran.
+    assert any(
+        event.type == LifecycleEventType.ANSWER_COMPOSED for event in bus.for_run(result.loop_id)
+    )
+
+
+def test_hermes_loop_scratchpad_entry_is_compact() -> None:
+    entry = hermes_loop_scratchpad_entry(
+        {
+            "audit_ref": {
+                "loop_id": "11111111-1111-1111-1111-111111111111",
+                "trace_id": "22222222-2222-2222-2222-222222222222",
+                "tool_names": ["projectlens_authorized_evidence"],
+                "hermes_ok": True,
+                "allow_apply": False,
+            }
+        }
+    )
+    assert entry["loop_id"] == "11111111-1111-1111-1111-111111111111"
+    assert entry["allow_apply"] is False
+    assert entry["tool_names"] == ["projectlens_authorized_evidence"]
+    UUID(entry["loop_id"])
 
 
 def test_extract_tool_calls_from_messages_keeps_envelopes() -> None:
@@ -178,6 +243,267 @@ def test_extract_tool_calls_from_messages_keeps_envelopes() -> None:
     assert calls[0].arguments["query"] == "coupon"
     assert calls[0].envelope["ok"] is True
     assert calls[0].envelope["citations"]
+
+
+def test_real_runner_passes_explicit_model_endpoint_and_api_key(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    captured: dict = {}
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+            captured["questions"] = []
+
+        def run_conversation(self, question: str) -> dict:
+            captured["questions"].append(question)
+            captured["question"] = question
+            return {"final_response": "ok", "messages": []}
+
+    fake_module = ModuleType("run_agent")
+    fake_module.AIAgent = FakeAIAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "run_agent", fake_module)
+
+    monkeypatch.setattr(
+        "project_lens.integrations.feishu.hermes_loop_runner.assert_external_calls_allowed",
+        lambda *args, **kwargs: None,
+    )
+
+    runner = HermesAIAgentLoopRunner(
+        client=object(),
+        config=ProjectLensPluginConfig(),
+        provider="openai",
+        model="gpt-test",
+        base_url="https://example.test/v1",
+        api_key="test-key",
+    )
+    runner._registered = True
+
+    result = runner.run(
+        question="Explain this project",
+        project=ProjectRef(tenant_id="demo", project_id="payment"),
+        user_id="user-1",
+        chat_id="chat-1",
+    )
+
+    assert result.ok is False
+    assert result.error == "Hermes completed without citation-ready project evidence"
+    assert captured["provider"] == "openai"
+    assert captured["model"] == "gpt-test"
+    assert captured["base_url"] == "https://example.test/v1"
+    assert captured["api_key"] == "test-key"
+    assert captured["enabled_toolsets"] == ["projectlens"]
+    assert captured["questions"][0] == "Explain this project"
+
+
+def test_real_runner_appends_projectlens_context_to_ephemeral_prompt(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    captured: dict = {}
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+
+        def run_conversation(self, question: str) -> dict:
+            return {"final_response": question, "messages": []}
+
+    fake_module = ModuleType("run_agent")
+    fake_module.AIAgent = FakeAIAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "run_agent", fake_module)
+
+    monkeypatch.setattr(
+        "project_lens.integrations.feishu.hermes_loop_runner.assert_external_calls_allowed",
+        lambda *args, **kwargs: None,
+    )
+
+    runner = HermesAIAgentLoopRunner(
+        client=object(),
+        config=ProjectLensPluginConfig(),
+        api_key="test-key",
+    )
+    runner._registered = True
+    result = runner.run(
+        question="What is the owner?",
+        project=ProjectRef(tenant_id="demo", project_id="payment"),
+        user_id="user-1",
+        chat_id="chat-1",
+        context="approved_project_memories: owner=Ada",
+    )
+
+    assert result.ok is False
+    assert result.error == "Hermes completed without citation-ready project evidence"
+    assert "approved_project_memories: owner=Ada" in captured["ephemeral_system_prompt"]
+
+
+def test_real_runner_recovers_from_empty_authorized_evidence_with_readme(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    evidence_id = "11111111-1111-1111-1111-111111111111"
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            self.calls = 0
+
+        def run_conversation(self, question: str) -> dict:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "final_response": "项目资料不足。",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "empty-evidence",
+                                    "function": {
+                                        "name": "projectlens_authorized_evidence",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "empty-evidence",
+                            "content": '{"ok": true, "citations": [], "evidence_refs": []}',
+                        },
+                    ],
+                }
+            assert "README.md" in question
+            return {
+                "final_response": (
+                    '{"facts":[{"text":"当前项目名为 DeepSeek Harness",'
+                    '"citations":["11111111-1111-1111-1111-111111111111"]}]}'
+                ),
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "readme",
+                                "function": {
+                                    "name": "projectlens_read_project_file",
+                                    "arguments": '{"path":"README.md"}',
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "readme",
+                        "content": (
+                            '{"ok": true, "citations": [{"id": "'
+                            + evidence_id
+                            + '", "kind": "document", "source_uri": "repository:README.md", '
+                            '"summary": "DeepSeek Harness"}], "evidence_refs": [{"id": "'
+                            + evidence_id
+                            + '", "kind": "document", "source_uri": "repository:README.md", '
+                            '"summary": "DeepSeek Harness"}]}'
+                        ),
+                    },
+                ],
+            }
+
+    fake_module = ModuleType("run_agent")
+    fake_module.AIAgent = FakeAIAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "run_agent", fake_module)
+    monkeypatch.setattr(
+        "project_lens.integrations.feishu.hermes_loop_runner.assert_external_calls_allowed",
+        lambda *args, **kwargs: None,
+    )
+    runner = HermesAIAgentLoopRunner(client=object(), config=ProjectLensPluginConfig())
+    runner._registered = True
+
+    result = runner.run(
+        question="现在接的项目叫什么？",
+        project=ProjectRef(tenant_id="demo", project_id="deepseek-harness"),
+        user_id="user-1",
+        chat_id="chat-1",
+    )
+
+    assert result.ok is True
+    assert result.verified_answer is not None
+    assert result.verified_answer.facts
+    assert "DeepSeek Harness" in result.verified_answer.facts[0].text
+    assert [call.name for call in result.tool_calls] == [
+        "projectlens_authorized_evidence",
+        "projectlens_read_project_file",
+    ]
+
+
+def test_real_runner_marks_model_gateway_errors_as_model_failure(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    class FakeAIAgent:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            pass
+
+        def run_conversation(self, question: str) -> dict:
+            return {"failed": True, "error": "HTTP 502 bad gateway", "messages": []}
+
+    fake_module = ModuleType("run_agent")
+    fake_module.AIAgent = FakeAIAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "run_agent", fake_module)
+    monkeypatch.setattr(
+        "project_lens.integrations.feishu.hermes_loop_runner.assert_external_calls_allowed",
+        lambda *args, **kwargs: None,
+    )
+    runner = HermesAIAgentLoopRunner(client=object(), config=ProjectLensPluginConfig())
+    runner._registered = True
+
+    result = runner.run(
+        question="介绍项目",
+        project=ProjectRef(tenant_id="demo", project_id="payment"),
+        user_id="user-1",
+        chat_id="chat-1",
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.startswith("模型调用失败：")
+
+
+def test_real_runner_classifies_model_exception_as_model_failure(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    class FakeAIAgent:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            pass
+
+        def run_conversation(self, question: str) -> dict:
+            raise RuntimeError("HTTP 429 rate limit")
+
+    fake_module = ModuleType("run_agent")
+    fake_module.AIAgent = FakeAIAgent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "run_agent", fake_module)
+    monkeypatch.setattr(
+        "project_lens.integrations.feishu.hermes_loop_runner.assert_external_calls_allowed",
+        lambda *args, **kwargs: None,
+    )
+    runner = HermesAIAgentLoopRunner(client=object(), config=ProjectLensPluginConfig())
+    runner._registered = True
+
+    result = runner.run(
+        question="介绍项目",
+        project=ProjectRef(tenant_id="demo", project_id="payment"),
+        user_id="user-1",
+        chat_id="chat-1",
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.startswith("模型调用失败：")
+
+
+def test_real_runner_repr_does_not_expose_api_key() -> None:
+    runner = HermesAIAgentLoopRunner(
+        client=object(),
+        config=ProjectLensPluginConfig(),
+        api_key="secret-that-must-not-leak",
+    )
+
+    assert "secret-that-must-not-leak" not in repr(runner)
 
 
 def json_dumps_envelope() -> str:

@@ -82,7 +82,10 @@ def _answer(
     )
 
 
-def test_select_answer_view_by_question_and_skill() -> None:
+def test_select_answer_view_by_question_and_skill(monkeypatch) -> None:
+    from project_lens.config import settings
+
+    monkeypatch.setattr(settings, "project_skill_routing_enabled", True)
     evidence = (_evidence(),)
     claim = Claim(
         text="项目定位：支付演示服务",
@@ -127,7 +130,10 @@ def test_select_answer_view_by_question_and_skill() -> None:
     )
 
 
-def test_intro_card_has_overview_title_without_skill_on_first_screen() -> None:
+def test_intro_card_has_overview_title_without_skill_on_first_screen(monkeypatch) -> None:
+    from project_lens.config import settings
+
+    monkeypatch.setattr(settings, "project_skill_routing_enabled", True)
     evidence = (_evidence(path="README.md"),)
     answer = _answer(
         skill="project_knowledge",
@@ -182,7 +188,10 @@ def test_insufficient_evidence_fallback_is_actionable() -> None:
     assert confidence_status_label(0.0, has_evidence=False) == "当前资料不足"
 
 
-def test_audit_debug_zone_omits_secrets_and_is_not_first_screen() -> None:
+def test_audit_debug_zone_omits_secrets_and_is_not_first_screen(monkeypatch) -> None:
+    from project_lens.config import settings
+
+    monkeypatch.setattr(settings, "project_skill_routing_enabled", True)
     evidence = (_evidence(),)
     answer = _answer(
         skill="architecture",
@@ -226,13 +235,11 @@ def test_human_evidence_label_prefers_path_title() -> None:
     assert human_evidence_label(item) == "docs/owners.md"
 
 
-def test_feishu_intro_live_path_uses_overview_view() -> None:
-    from tests.test_feishu_integration import (
-        _configure_verifier,
-        _last_card_text,
-        _message_payload,
-    )
+def test_feishu_intro_live_path_uses_overview_view(monkeypatch) -> None:
+    from project_lens.config import settings
+    from tests.test_feishu_integration import _configure_verifier, _message_payload
 
+    monkeypatch.setattr(settings, "project_skill_routing_enabled", True)
     app = create_app()
     _configure_verifier(app)
     client = TestClient(app)
@@ -243,9 +250,14 @@ def test_feishu_intro_live_path_uses_overview_view() -> None:
     assert response.status_code == 200
     card = app.state.feishu_messenger.messages[-1].content
     assert card["header"]["title"]["content"] == "ProjectLens 项目概览"
-    card_text = _last_card_text(app)
+    card_text = "\n".join(
+        element.get("content", "")
+        for element in card.get("elements", [])
+        if isinstance(element, dict)
+    )
     assert "**当前 Skill**" not in card_text
-    assert "**一句话结论**" in card_text
-    assert "**来源摘要**" in card_text
+    assert "Evidence is insufficient." in card_text
+    assert "**一句话结论**" not in card_text
+    assert "**来源摘要**" not in card_text
     assert "**调试信息**" in card_text
     assert "内部路由：" in card_text

@@ -17,10 +17,13 @@ import threading
 from pathlib import Path
 from typing import Any, Protocol
 
+from project_lens.config import assert_external_calls_allowed
 from project_lens.domain.models import ProjectRef
 from project_lens.integrations.hermes_plugin.config import ProjectLensPluginConfig
 from project_lens.integrations.hermes_plugin.tools import (
     FORMAL_TOOL_NAMES,
+    MEMORY_TOOL_NAMES,
+    HISTORY_TOOL_NAMES,
     TOOLSET_NAME,
     build_openai_tool_schema,
     resolve_tool_catalog,
@@ -56,6 +59,8 @@ class HermesLoopRunResult:
     messages: tuple[Any, ...] = ()
     ok: bool = True
     error: str | None = None
+    answer_draft: Any | None = None
+    verified_answer: Any | None = None
 
 
 class HermesLoopRunner(Protocol):
@@ -66,7 +71,28 @@ class HermesLoopRunner(Protocol):
         project: ProjectRef,
         user_id: str,
         chat_id: str,
+        context: str | None = None,
     ) -> HermesLoopRunResult: ...
+
+
+def _repair_answer_draft(*, agent: Any, raw_response: str) -> str:
+    """Ask Hermes once to reformat its own answer without reopening research."""
+
+    excerpt = raw_response.strip()[:4_000]
+    prompt = (
+        "Return only a valid JSON AnswerDraft object. Do not call tools, "
+        "do not add facts, and do not change the meaning. Preserve citations "
+        "only when they are present in the previous answer. Use empty arrays "
+        "for fields you cannot support. Previous answer:\n"
+        f"{excerpt}"
+    )
+    try:
+        repaired = agent.run_conversation(prompt)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(repaired, dict):
+        return ""
+    return str(repaired.get("final_response") or "").strip()
 
 
 @dataclass
@@ -76,8 +102,10 @@ class HermesAIAgentLoopRunner:
     client: Any
     config: ProjectLensPluginConfig
     hermes_repo: str = ""
-    provider: str = "deepseek"
-    model: str = "deepseek-v4-flash"
+    provider: str = "openai"
+    model: str = "gpt-5.4-mini"
+    base_url: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     max_iterations: int = 8
     _registered: bool = field(default=False, init=False, repr=False)
 
@@ -88,7 +116,9 @@ class HermesAIAgentLoopRunner:
         project: ProjectRef,
         user_id: str,
         chat_id: str,
+        context: str | None = None,
     ) -> HermesLoopRunResult:
+        assert_external_calls_allowed("hermes")
         q = question.strip()
         if not q:
             return HermesLoopRunResult(
@@ -118,6 +148,8 @@ class HermesAIAgentLoopRunner:
         )
         try:
             agent = AIAgent(
+                base_url=self.base_url or None,
+                api_key=self.api_key or None,
                 provider=self.provider or None,
                 model=self.model,
                 quiet_mode=True,
@@ -129,7 +161,14 @@ class HermesAIAgentLoopRunner:
                     "You answer questions about a software project. "
                     "Use only the projectlens_* read-only tools. "
                     "Cite evidence from tool results. Never invent facts. "
-                    "Never apply, PR, deploy, rollback, or restart."
+                    "Never apply, PR, deploy, rollback, or restart. "
+                    "For project identity, project name, or introduction questions, "
+                    "prefer projectlens_read_project_file with README.md or a public "
+                    "docs path; use projectlens_list_project_files to discover paths, "
+                    "and use projectlens_search_context as a supplementary lookup. "
+                    "Do not stop after an empty or failed authorized_evidence result; "
+                    "continue with the file tools."
+                    + (f"\n\n{context}" if context else "")
                 ),
                 user_id=user_id,
                 chat_id=chat_id,
@@ -140,7 +179,7 @@ class HermesAIAgentLoopRunner:
             return HermesLoopRunResult(
                 final_response="",
                 ok=False,
-                error=f"Hermes agent loop failed: {exc}",
+                error=_classify_hermes_failure(f"Hermes agent loop failed: {exc}"),
             )
         finally:
             _REQUEST_CTX.reset(token)
@@ -156,20 +195,88 @@ class HermesAIAgentLoopRunner:
         tool_calls = extract_tool_calls_from_messages(messages)
         final_response = str(raw.get("final_response") or "").strip()
         failed = bool(raw.get("failed") or raw.get("error"))
-        if failed and not final_response:
+        if failed:
             return HermesLoopRunResult(
-                final_response="",
+                final_response=final_response,
                 tool_calls=tool_calls,
                 messages=messages,
                 ok=False,
-                error=str(raw.get("error") or "Hermes conversation failed"),
+                error=_classify_hermes_failure(
+                    str(raw.get("error") or "Hermes model call failed")
+                ),
             )
+        from project_lens.agent.hermes_answer_parser import (
+            parse_hermes_answer,
+            parse_structured_hermes_answer,
+        )
+        from project_lens.agent.hermes_answer import project_answer_from_hermes
+
+        if _needs_evidence_recovery(tool_calls=tool_calls, final_response=final_response):
+            repair_raw = _run_evidence_recovery(agent=agent, question=q)
+            if isinstance(repair_raw, dict):
+                repair_messages = tuple(repair_raw.get("messages") or ())
+                messages = messages + repair_messages
+                tool_calls = extract_tool_calls_from_messages(messages)
+                repaired_response = str(repair_raw.get("final_response") or "").strip()
+                if repaired_response:
+                    final_response = repaired_response
+                if repair_raw.get("failed") or repair_raw.get("error"):
+                    failed = True
+                    recovery_error = str(
+                        repair_raw.get("error") or "Hermes evidence recovery failed"
+                    )
+                else:
+                    recovery_error = ""
+            else:
+                recovery_error = ""
+        else:
+            recovery_error = ""
+
+        if failed:
+            error = recovery_error or str(raw.get("error") or "Hermes model call failed")
+            return HermesLoopRunResult(
+                final_response=final_response,
+                tool_calls=tool_calls,
+                messages=messages,
+                ok=False,
+                error=_classify_hermes_failure(error),
+            )
+
+        if not _has_citation_ready_evidence(tool_calls):
+            return HermesLoopRunResult(
+                final_response=final_response,
+                tool_calls=tool_calls,
+                messages=messages,
+                ok=False,
+                error="Hermes completed without citation-ready project evidence",
+            )
+
+        answer_draft = parse_structured_hermes_answer(final_response)
+        if answer_draft is None:
+            repaired_response = _repair_answer_draft(
+                agent=agent,
+                raw_response=final_response,
+            )
+            repaired_draft = parse_structured_hermes_answer(repaired_response)
+            if repaired_draft is not None:
+                final_response = repaired_response
+                answer_draft = repaired_draft
+        if answer_draft is None:
+            answer_draft = parse_hermes_answer(final_response)
+        verified_answer = project_answer_from_hermes(
+            project=project,
+            draft=answer_draft,
+            tool_calls=tool_calls,
+        )
+
         return HermesLoopRunResult(
             final_response=final_response,
             tool_calls=tool_calls,
             messages=messages,
             ok=True,
             error=None,
+            answer_draft=answer_draft,
+            verified_answer=verified_answer,
         )
 
     def _ensure_hermes_importable(self) -> None:
@@ -192,9 +299,11 @@ class HermesAIAgentLoopRunner:
             formal = [
                 item
                 for item in catalog
-                if isinstance(item, dict) and item.get("name") in FORMAL_TOOL_NAMES
+                if isinstance(item, dict)
+                and item.get("name")
+                in (set(FORMAL_TOOL_NAMES) | set(MEMORY_TOOL_NAMES) | set(HISTORY_TOOL_NAMES))
             ]
-            if {item["name"] for item in formal} != set(FORMAL_TOOL_NAMES):
+            if not set(FORMAL_TOOL_NAMES).issubset({item["name"] for item in formal}):
                 raise RuntimeError(
                     "formal projectlens_* catalog incomplete for Hermes loop registration"
                 )
@@ -218,10 +327,57 @@ class HermesAIAgentLoopRunner:
                     override=True,
                 )
             registered = set(registry.get_tool_names_for_toolset(TOOLSET_NAME))
-            if not set(FORMAL_TOOL_NAMES).issubset(registered):
-                missing = sorted(set(FORMAL_TOOL_NAMES) - registered)
-                raise RuntimeError(f"failed to register projectlens tools: missing={missing}")
+            required_names = set(FORMAL_TOOL_NAMES)
+            if not required_names.issubset(registered):
+                missing = sorted(required_names - registered)
+                raise RuntimeError(
+                    f"failed to register projectlens tools: missing={missing}"
+                )
             self._registered = True
+
+
+def _needs_evidence_recovery(
+    *, tool_calls: tuple[HermesLoopToolCall, ...], final_response: str
+) -> bool:
+    if not tool_calls:
+        return True
+    if not _has_citation_ready_evidence(tool_calls):
+        return True
+    return not final_response.strip()
+
+
+def _has_citation_ready_evidence(tool_calls: tuple[HermesLoopToolCall, ...]) -> bool:
+    for call in tool_calls:
+        if call.envelope.get("ok") is not True:
+            continue
+        if call.envelope.get("citations") or call.envelope.get("evidence_refs"):
+            return True
+    return False
+
+
+def _run_evidence_recovery(*, agent: Any, question: str) -> dict[str, Any] | None:
+    prompt = (
+        f"The question is: {question}\n"
+        "Continue the same read-only investigation. The previous tool result was "
+        "empty, failed, or did not provide citation-ready evidence. Do not answer "
+        "yet. For project identity or introduction, call projectlens_read_project_file "
+        "on README.md first; if that path is unavailable, call "
+        "projectlens_list_project_files for README/docs and then read one public file. "
+        "Use projectlens_search_context only as a supplement. Do not call "
+        "projectlens_authorized_evidence again unless needed."
+    )
+    try:
+        response = agent.run_conversation(prompt)
+    except Exception as exc:  # noqa: BLE001
+        return {"failed": True, "error": _classify_hermes_failure(str(exc))}
+    return response if isinstance(response, dict) else {"failed": True, "error": "Hermes recovery returned an invalid response"}
+
+
+def _classify_hermes_failure(error: str) -> str:
+    lowered = error.casefold()
+    if any(marker in lowered for marker in ("502", "429", "503", "504", "api", "model", "gateway", "rate limit")):
+        return f"模型调用失败：{error}"
+    return error
 
 
 class _HermesRegistryToolContext:

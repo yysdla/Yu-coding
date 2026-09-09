@@ -26,6 +26,7 @@ def _configure_feishu(app) -> None:
             service="order-service",
             environment="production",
         ),
+        allow_demo_fallback=True,
     )
     app.state.feishu_messenger = RecordingFeishuMessenger()
     app.state.feishu_event_service._messenger = app.state.feishu_messenger
@@ -138,7 +139,7 @@ def test_feishu_doc_sync_status_shortcut_posts_status_card() -> None:
                 "tenant_key": "demo",
             },
             "event": {
-                "sender": {"sender_id": {"user_id": "feishu-user-1"}},
+                "sender": {"sender_id": {"open_id": "feishu-user-1", "user_id": "feishu-user-1"}},
                 "message": {
                     "message_id": "m-doc-sync-status",
                     "chat_id": "chat-1",
@@ -192,7 +193,7 @@ def test_status_store_failure_does_not_break_normal_chat() -> None:
                 "tenant_key": "demo",
             },
             "event": {
-                "sender": {"sender_id": {"user_id": "feishu-user-1"}},
+                "sender": {"sender_id": {"open_id": "feishu-user-1", "user_id": "feishu-user-1"}},
                 "message": {
                     "message_id": "m-broken-status",
                     "chat_id": "chat-1",
@@ -223,7 +224,7 @@ def test_status_store_failure_does_not_break_normal_chat() -> None:
                 "tenant_key": "demo",
             },
             "event": {
-                "sender": {"sender_id": {"user_id": "feishu-user-1"}},
+                "sender": {"sender_id": {"open_id": "feishu-user-1", "user_id": "feishu-user-1"}},
                 "message": {
                     "message_id": "m-normal-after-status",
                     "chat_id": "chat-1",
@@ -239,7 +240,10 @@ def test_status_store_failure_does_not_break_normal_chat() -> None:
     assert "run_id" in normal.json()
 
 
-def test_sync_api_includes_statuses_in_response() -> None:
+def test_sync_api_includes_statuses_in_response(monkeypatch) -> None:  # noqa: ANN001
+    from tests.test_feishu_doc_sync import _allow_feishu_external
+
+    _allow_feishu_external(monkeypatch)
     app = create_app()
     transport = RecordingTransport(
         {

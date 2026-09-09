@@ -12,10 +12,12 @@ from typing import Any
 from uuid import uuid4
 
 from project_lens.context.engine import ContextEngine
+from project_lens.context.knowledge_gaps import build_knowledge_gap_report
 from project_lens.context.models import AccessContext, ContextQuery, EvidenceBundle
 from project_lens.domain.models import Evidence, GraphEvidence, KnowledgeGapReport, ProjectRef
 from project_lens.domain.ops import OpsFinding, OpsQuery
 from project_lens.graph.query import GraphQuery
+from project_lens.project_space.policies import EffectiveAccessScope, source_path_allowed
 from project_lens.runtime.policy import RiskClass
 from project_lens.runtime.tool_gateway import ToolAuditEvent
 from project_lens.runtime.tool_specs import (
@@ -31,6 +33,7 @@ class ReadContextGateway:
 
     engine: ContextEngine
     allow_apply: bool = False
+    require_scope: bool = False
     audit_events: list[ToolAuditEvent] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -44,17 +47,37 @@ class ReadContextGateway:
         self,
         query: ContextQuery,
         access: AccessContext,
+        scope: EffectiveAccessScope | None = None,
     ) -> EvidenceBundle:
         assert_tool_callable("search_context", allow_apply=False)
+        self._enforce_scope(scope, "search_context", query.project)
         bundle = self.engine.search(query, access)
+        if scope is not None:
+            visible_hits = tuple(
+                hit for hit in bundle.hits if _evidence_allowed(scope, hit.evidence)
+            )
+            hidden_count = len(bundle.hits) - len(visible_hits)
+            warnings = bundle.warnings
+            if hidden_count:
+                warnings = (*warnings, "some results were hidden by effective access scope")
+            bundle = bundle.model_copy(
+                update={
+                    "hits": visible_hits,
+                    "warnings": warnings,
+                    "retrieval_trace": {
+                        **bundle.retrieval_trace,
+                        "scope_hidden_count": hidden_count,
+                        "scope_visible_count": len(visible_hits),
+                    },
+                }
+            )
         self._audit(
             "search_context",
-            {
-                "project": _project_ref(query.project),
+            _audit_arguments(query.project, scope, {
                 "query": query.text[:200],
                 "limit": query.limit,
                 "hit_count": len(bundle.hits),
-            },
+            }),
             f"hits={len(bundle.hits)}",
             True,
         )
@@ -66,16 +89,19 @@ class ReadContextGateway:
         access: AccessContext,
         *,
         limit: int = 50,
+        scope: EffectiveAccessScope | None = None,
     ) -> tuple[Evidence, ...]:
         assert_tool_callable("authorized_evidence", allow_apply=False)
+        self._enforce_scope(scope, "authorized_evidence", project)
         evidence = self.engine.authorized_evidence(project, access, limit=limit)
+        if scope is not None:
+            evidence = tuple(item for item in evidence if _evidence_allowed(scope, item))
         self._audit(
             "authorized_evidence",
-            {
-                "project": _project_ref(project),
+            _audit_arguments(project, scope, {
                 "limit": limit,
                 "hit_count": len(evidence),
-            },
+            }),
             f"hit_count={len(evidence)}",
             True,
         )
@@ -85,15 +111,19 @@ class ReadContextGateway:
         self,
         project: ProjectRef,
         access: AccessContext,
+        scope: EffectiveAccessScope | None = None,
     ) -> KnowledgeGapReport:
         assert_tool_callable("list_knowledge_gaps", allow_apply=False)
-        report = self.engine.knowledge_gaps(project, access)
+        self._enforce_scope(scope, "list_knowledge_gaps", project)
+        if scope is None:
+            report = self.engine.knowledge_gaps(project, access)
+        else:
+            evidence = self.engine.authorized_evidence(project, access, limit=50)
+            visible = tuple(item for item in evidence if _evidence_allowed(scope, item))
+            report = build_knowledge_gap_report(visible, project=project)
         self._audit(
             "list_knowledge_gaps",
-            {
-                "project": _project_ref(project),
-                "gap_count": len(report.gaps),
-            },
+            _audit_arguments(project, scope, {"gap_count": len(report.gaps)}),
             f"gap_count={len(report.gaps)}",
             True,
         )
@@ -104,38 +134,66 @@ class ReadContextGateway:
         project: ProjectRef,
         access: AccessContext,
         query: GraphQuery,
+        scope: EffectiveAccessScope | None = None,
     ) -> tuple[GraphEvidence, ...]:
         assert_tool_callable("query_graph", allow_apply=False)
+        self._enforce_scope(scope, "query_graph", project)
         paths = self.engine.query_graph(project, access, query)
+        if scope is not None:
+            authorized = self.engine.authorized_evidence(project, access, limit=50)
+            visible_ids = {
+                item.id for item in authorized if _evidence_allowed(scope, item)
+            }
+            paths = tuple(
+                path
+                for path in paths
+                if path.evidence_ids
+                and set(path.evidence_ids).issubset(visible_ids)
+                and all(_evidence_allowed(scope, item) for item in path.cited_evidence)
+            )
         self._audit(
             "query_graph",
-            {
-                "project": _project_ref(project),
+            _audit_arguments(project, scope, {
                 "relation": query.relation,
                 "path_count": len(paths),
-            },
+            }),
             f"path_count={len(paths)}",
             True,
         )
         return paths
 
-    def query_ops(self, query: OpsQuery, access: AccessContext) -> OpsFinding:
+    def query_ops(
+        self,
+        query: OpsQuery,
+        access: AccessContext,
+        scope: EffectiveAccessScope | None = None,
+    ) -> OpsFinding:
         """Windowed ops query; audited as query_logs (ephemeral, not long-term RAG)."""
 
         assert_tool_callable("query_logs", allow_apply=False)
+        self._enforce_scope(scope, "query_logs", query.project)
         finding = self.engine.query_ops(query, access)
         self._audit(
             "query_logs",
-            {
-                "project": _project_ref(query.project),
+            _audit_arguments(query.project, scope, {
                 "signal_count": len(finding.signals),
                 "evidence_count": len(finding.evidence),
                 "ephemeral": True,
-            },
+            }),
             f"signals={len(finding.signals)}",
             True,
         )
         return finding
+
+    def assert_source_readable(
+        self,
+        scope: EffectiveAccessScope,
+        path: str,
+    ) -> None:
+        """Reject reads before ToolGateway when path is outside effective scope."""
+
+        if not source_path_allowed(scope, path):
+            raise PermissionError("source path is outside readable effective scope")
 
     def audit_summary(self) -> dict[str, Any]:
         names = [event.tool_name for event in self.audit_events]
@@ -153,6 +211,24 @@ class ReadContextGateway:
 
     def reset_audit(self) -> None:
         self.audit_events.clear()
+
+    def _enforce_scope(
+        self,
+        scope: EffectiveAccessScope | None,
+        tool_name: str,
+        project: ProjectRef,
+    ) -> None:
+        if scope is None:
+            if self.require_scope:
+                raise PermissionError("effective access scope is required")
+            return
+        if tool_name not in scope.allowed_tools:
+            raise PermissionError(f"tool {tool_name} is not allowed for this actor/chat scope")
+        if (
+            project.tenant_id != scope.project.tenant_id
+            or project.project_id != scope.project.project_id
+        ):
+            raise PermissionError("project mismatch for effective access scope")
 
     def _audit(
         self,
@@ -173,6 +249,26 @@ class ReadContextGateway:
         )
 
 
+def _audit_arguments(
+    project: ProjectRef,
+    scope: EffectiveAccessScope | None,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"project": _project_ref(project), **extra}
+    if scope is not None:
+        payload.update(
+            {
+                "actor_id": scope.actor_id,
+                "chat_id": scope.chat_id,
+                "role": scope.role.value,
+                "identity_source": scope.identity_source,
+                "policy_version": scope.policy_version,
+                "chat_type": scope.chat_type,
+            }
+        )
+    return payload
+
+
 def _project_ref(project: ProjectRef) -> dict[str, str | None]:
     return {
         "tenant_id": project.tenant_id,
@@ -180,3 +276,30 @@ def _project_ref(project: ProjectRef) -> dict[str, str | None]:
         "service": project.service,
         "environment": project.environment,
     }
+
+
+def _evidence_allowed(scope: EffectiveAccessScope, evidence: Evidence) -> bool:
+    return any(source_path_allowed(scope, path) for path in _evidence_paths(evidence))
+
+
+def _evidence_paths(evidence: Evidence) -> tuple[str, ...]:
+    raw = str(
+        evidence.metadata.get("path")
+        or evidence.metadata.get("file")
+        or evidence.source.source_id
+    ).replace("\\", "/")
+    raw = raw.split("#", 1)[0]
+    candidates = [raw]
+    virtual_prefix = {
+        "document": ("knowledge/", "docs/"),
+        "commit": ("commits/",),
+        "pull_request": ("pull_requests/",),
+        "log": ("logs/",),
+        "task": ("tasks/",),
+        "incident": ("incidents/",),
+        "metric": ("metrics/",),
+    }.get(evidence.type.value, ())
+    for prefix in virtual_prefix:
+        if not raw.startswith(prefix):
+            candidates.append(f"{prefix}{raw.lstrip('/')}")
+    return tuple(dict.fromkeys(path for path in candidates if path))

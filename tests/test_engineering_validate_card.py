@@ -18,6 +18,7 @@ from project_lens.domain.models import (
     RunStatus,
     SourceRef,
 )
+from project_lens.integrations.feishu.audiences import AnswerAudience
 from project_lens.integrations.feishu.cards import render_answer_card
 from project_lens.runtime.patch_plan import FilePatch, PatchPlan
 from project_lens.workflow.engineering_skill import (
@@ -94,7 +95,11 @@ def test_engineering_validate_card_shows_full_checklist() -> None:
         test_commands=('python -c "print(\'ok\')"',),
     )
     proposal = skill.propose_plan(project=_project(), plan=plan)
-    card = render_answer_card(_run(_project()), _answer_with_engineering(proposal.action))
+    card = render_answer_card(
+        _run(_project()),
+        _answer_with_engineering(proposal.action),
+        audience=AnswerAudience.TECHNICAL,
+    )
     card_text = str(card)
 
     assert "**修复提案**" in card_text
@@ -182,7 +187,11 @@ def test_failed_validation_records_failed_attempts_on_card_and_scratchpad() -> N
     assert "worktree_validate_failed" in proposal.action.arguments["failed_attempts"][0]
 
     card_text = str(
-        render_answer_card(_run(_project()), _answer_with_engineering(proposal.action))
+        render_answer_card(
+            _run(_project()),
+            _answer_with_engineering(proposal.action),
+            audience=AnswerAudience.TECHNICAL,
+        )
     )
     assert "failed attempts:" in card_text
     assert "worktree_validate_failed" in card_text

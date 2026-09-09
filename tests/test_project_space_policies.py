@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from project_lens.domain.models import ProjectRef
 from project_lens.project_space.policies import (
     AnswerDepth,
@@ -116,6 +118,7 @@ def test_runtime_context_resolver_uses_role_and_chat_intersection(tmp_path: Path
         project_id="payment",
         chat_id="chat-1",
         user_id="u_dev",
+        chat_type="group",
     )
 
     assert resolved.project == project
@@ -127,10 +130,12 @@ def test_runtime_context_resolver_uses_role_and_chat_intersection(tmp_path: Path
     assert resolved.effective_scope.allowed_tools == ("search_context",)
     assert resolved.effective_scope.forbidden_sources == ("docs/private/", "secrets/")
     assert resolved.effective_scope.answer_depth == AnswerDepth.BALANCED
-    assert resolved.effective_scope.visibility_level == VisibilityLevel.PRIVATE
+    assert resolved.effective_scope.visibility_level == VisibilityLevel.TEAM_SHARED
+    assert resolved.effective_scope.chat_type == "group"
+    assert resolved.effective_scope.allow_private_details is False
 
 
-def test_runtime_context_resolver_falls_back_to_conservative_defaults(tmp_path: Path) -> None:
+def test_runtime_context_resolver_falls_back_to_guest_public_sources(tmp_path: Path) -> None:
     path = tmp_path / "project_space_without_policies.json"
     path.write_text(
         json.dumps(
@@ -139,6 +144,7 @@ def test_runtime_context_resolver_falls_back_to_conservative_defaults(tmp_path: 
                 "project_id": "payment",
                 "display_name": "Payment Demo",
                 "repositories": [{"name": "payment", "path": "examples/payment_service"}],
+                "public_sources": ["knowledge/"],
             },
             ensure_ascii=False,
         ),
@@ -156,14 +162,35 @@ def test_runtime_context_resolver_falls_back_to_conservative_defaults(tmp_path: 
 
     assert resolved.role_policy.role == RoleKind.GUEST
     assert resolved.chat_policy.visibility_level == VisibilityLevel.TEAM_SHARED
-    assert resolved.effective_scope.readable_sources == ("src/", "tests/", "knowledge/")
-    assert resolved.effective_scope.allowed_tools == (
-        "search_context",
-        "read_project_file",
-        "query_graph",
-        "list_knowledge_gaps",
-    )
+    assert resolved.effective_scope.readable_sources == ("knowledge/",)
+    assert resolved.effective_scope.allowed_tools == ("search_context",)
     assert resolved.effective_scope.visibility_level == VisibilityLevel.TEAM_SHARED
+
+
+def test_runtime_context_resolver_denies_unknown_without_public_sources(tmp_path: Path) -> None:
+    path = tmp_path / "project_space_no_public.json"
+    path.write_text(
+        json.dumps(
+            {
+                "tenant_id": "demo",
+                "project_id": "payment",
+                "display_name": "Payment Demo",
+                "repositories": [{"name": "payment", "path": "examples/payment_service"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    space = load_project_space_json(path, base_dir=tmp_path)
+    resolver = ProjectRuntimeContextResolver(project_registry=ProjectRegistry((space,)))
+
+    with pytest.raises(PermissionError, match="public project sources"):
+        resolver.resolve(
+            tenant_id="demo",
+            project_id="payment",
+            chat_id="chat-9",
+            user_id="u_unknown",
+        )
 
 
 def test_effective_scope_uses_intersection_not_union() -> None:
@@ -187,7 +214,11 @@ def test_effective_scope_uses_intersection_not_union() -> None:
         readable_sources=("src/", "docs/"),
         allowed_tools=("search_context", "list_knowledge_gaps"),
     )
-    scope = combine_role_and_chat_policy(role_policy=role, chat_policy=chat)
+    scope = combine_role_and_chat_policy(
+        role_policy=role,
+        chat_policy=chat,
+        chat_type="group",
+    )
     assert scope.readable_sources == ("src/",)
     assert scope.allowed_tools == ("search_context",)
     assert "tests/" not in scope.readable_sources

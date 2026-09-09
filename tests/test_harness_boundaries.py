@@ -31,6 +31,7 @@ from project_lens.domain.models import (
     SourceRef,
 )
 from project_lens.integrations.feishu.adapter import RecordingFeishuMessenger
+from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopResult
 from project_lens.integrations.feishu.identity import parse_project_bindings
 from project_lens.main import create_app
 from project_lens.runtime.policy import EngineeringPolicy, RiskClass
@@ -67,6 +68,76 @@ def _project() -> ProjectRef:
     )
 
 
+class _FakeHermesEngineeringBridge:
+    async def answer(self, **kwargs):  # noqa: ANN003
+        project = kwargs["project"]
+        evidence_id = uuid4()
+        proposal_id = uuid4()
+        file_path = "src/order_service.py"
+        evidence = Evidence(
+            id=evidence_id,
+            type=EvidenceType.CODE,
+            project=project,
+            source=SourceRef(system="local", source_id="order_service.py"),
+            content="create_order",
+            observed_at=datetime.now(timezone.utc),
+            access_scope="project:payment:read",
+            content_hash="1234567890abcdefcc",
+            metadata={"file": file_path},
+        )
+        answer = ProjectAnswer(
+            project=project,
+            skill="incident_diagnosis",
+            confidence=0.7,
+            status="identified",
+            business_summary="failure",
+            technical_summary="null coupon",
+            claims=(
+                Claim(
+                    text="coupon null",
+                    type=ClaimType.FACT,
+                    evidence_ids=(evidence.id,),
+                    grade=EvidenceGrade.B,
+                ),
+            ),
+            evidence=(evidence,),
+            recommended_actions=(
+                ActionProposal(
+                    id=proposal_id,
+                    title="fix",
+                    tool_name="engineering_proposal",
+                    requires_approval=True,
+                    arguments={
+                        "affected_paths": [file_path],
+                        "diff_summary": "+guard",
+                        "can_apply": False,
+                        "allow_apply": False,
+                        "test_passed": True,
+                        "explanation": "guard",
+                        "failed_attempts": [],
+                        "test_commands": ['python -c "print(\'ok\')"'],
+                        "patch_plan_text": "Guard optional coupon",
+                    },
+                ),
+            ),
+        )
+        return FeishuHermesToolLoopResult(
+            ok=True,
+            envelope={
+                "ok": True,
+                "audit_ref": {
+                    "allow_apply": False,
+                    "loop_id": str(kwargs["loop_id"]),
+                    "trace_id": str(kwargs["trace_id"]),
+                },
+            },
+            tool_names=("projectlens_search_context",),
+            loop_id=kwargs["loop_id"],
+            trace_id=kwargs["trace_id"],
+            verified_answer=answer,
+        )
+
+
 def _configure_feishu(app) -> None:
     verifier = app.state.feishu_event_service._verifier
     verifier._verification_token = "project-lens-local-token"
@@ -74,9 +145,13 @@ def _configure_feishu(app) -> None:
     app.state.feishu_event_service._identity_mapper = parse_project_bindings(
         "",
         default_project=_project(),
+        allow_demo_fallback=True,
     )
     app.state.feishu_messenger = RecordingFeishuMessenger()
     app.state.feishu_event_service._messenger = app.state.feishu_messenger
+    app.state.feishu_hermes_tool_loop_bridge.answer = _FakeHermesEngineeringBridge().answer
+    if getattr(app.state, "hermes_runtime_service", None) is not None:
+        app.state.hermes_runtime_service._bridge = app.state.feishu_hermes_tool_loop_bridge
 
 
 def test_tool_specs_lock_apply_as_human_controlled() -> None:
@@ -415,7 +490,7 @@ def test_feishu_engineering_card_never_offers_apply() -> None:
                 "tenant_key": "demo",
             },
             "event": {
-                "sender": {"sender_id": {"user_id": "feishu-user-1"}},
+                "sender": {"sender_id": {"open_id": "feishu-user-1", "user_id": "feishu-user-1"}},
                 "message": {
                     "message_id": "message-harness-boundary",
                     "chat_id": "chat-1",

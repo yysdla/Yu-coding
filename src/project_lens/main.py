@@ -9,9 +9,11 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 
 from project_lens import __version__
-from project_lens.agent.investigation import ProjectInvestigationAgent
+from project_lens.api.trusted_actor_middleware import TrustedActorTestMiddleware
+from project_lens.api.service_auth_middleware import ServiceAuthMiddleware
 from project_lens.api.memory_routes import router as memory_router
 from project_lens.api.project_agent_routes import router as project_agent_router
+from project_lens.api.hermes_execution_routes import router as hermes_execution_router
 from project_lens.api.routes import router
 from project_lens.application.conversation_service import ConversationService
 from project_lens.application.feishu_doc_sync import FeishuDocumentSyncService
@@ -20,11 +22,43 @@ from project_lens.application.feishu_doc_sync_scheduler import (
     attach_scheduler_to_app,
 )
 from project_lens.application.feishu_doc_sync_status import SQLiteFeishuDocSyncStatusStore
+from project_lens.application.connector_sync import ConnectorSyncService
+from project_lens.application.project_connector_factory import ProjectConnectorFactory
+from project_lens.application.wiki_compiler import (
+    SQLiteWikiDraftStore,
+    WikiDraftCompiler,
+    WikiDraftWorkflowService,
+    RecordingWikiPublisher,
+)
+from project_lens.integrations.feishu.wiki_publisher import FeishuWikiPublisher
+from project_lens.application.connector_sync_status import ConnectorSyncStateStore
+from project_lens.application.hermes_runtime import HermesRuntimeService
 from project_lens.application.project_agent_ask import ProjectAgentAskService
 from project_lens.application.project_agent_role_view import ProjectAgentRoleViewService
+from project_lens.application.project_agent_run_detail import ProjectAgentRunDetailService
 from project_lens.application.project_agent_tools import ProjectAgentToolService
+from project_lens.application.project_space_inspect import ProjectSpaceInspectService
 from project_lens.application.run_service import RunService
-from project_lens.config import settings
+from project_lens.application.risk_engine import RiskEngine
+from project_lens.application.risk_feedback_service import (
+    ProjectSpaceRiskFeedbackAuthorizer,
+    RiskFeedbackService,
+)
+from project_lens.application.risk_feedback_store import (
+    SQLiteHermesRiskReviewStore,
+    SQLiteRiskFeedbackStore,
+)
+from project_lens.application.risk_notification_service import (
+    ProjectRiskRecipientDirectory,
+    RiskNotificationService,
+)
+from project_lens.application.risk_store import SQLiteRiskStore
+from project_lens.application.hermes_risk_scheduler import (
+    HermesRiskBackgroundScheduler,
+    HermesRiskReviewScheduler,
+    attach_risk_scheduler_to_app,
+)
+from project_lens.config import isolation_active, settings
 from project_lens.context.bootstrap import (
     build_registered_context_engine,
     parse_local_project_registrations,
@@ -36,6 +70,14 @@ from project_lens.context.conversation_store import (
     SQLiteConversationStore,
 )
 from project_lens.context.memory_store import SQLiteMemoryStore
+from project_lens.context.source_store import SQLiteSourceRecordStore
+from project_lens.context.history_store import SQLiteHistoryMemoryStore
+from project_lens.context.embeddings import (
+    EpisodeEmbeddingScorer,
+    MemoryEmbeddingScorer,
+    SQLiteEmbeddingCache,
+    build_embedding_provider,
+)
 from project_lens.project_space.policies import ProjectRuntimeContextResolver
 from project_lens.project_space.registry import (
     load_project_spaces_from_dir,
@@ -62,12 +104,11 @@ from project_lens.persistence.sqlite import (
     SQLiteEventDeduplicator,
     SQLiteEventSink,
     SQLiteRunRepository,
+    SQLiteEngineeringApprovalStore,
 )
 from project_lens.runtime.lifecycle import LifecycleBus
-from project_lens.workflow.engineering_skill import ProjectEngineeringSkill
-from project_lens.workflow.orchestrator import ProjectWorkflow
+from project_lens.context.models import AccessContext
 from project_lens.workflow.providers.factory import create_model_adapter_from_settings
-from project_lens.workflow.resolver import ProjectResolver
 
 
 def create_app(database_path: str = ":memory:") -> FastAPI:
@@ -76,13 +117,20 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         scheduler: FeishuDocSyncScheduler | None = getattr(
             application.state, "feishu_doc_sync_scheduler", None
         )
+        risk_scheduler: HermesRiskBackgroundScheduler | None = getattr(
+            application.state, "hermes_risk_scheduler", None
+        )
         if scheduler is not None:
             scheduler.start()
+        if risk_scheduler is not None:
+            risk_scheduler.start()
         try:
             yield
         finally:
             if scheduler is not None:
                 scheduler.stop()
+            if risk_scheduler is not None:
+                risk_scheduler.stop()
 
     application = FastAPI(
         title="ProjectLens API",
@@ -95,30 +143,43 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         settings.local_project_registry,
         base_dir=base_dir,
     )
-    context_engine, evidence_index = build_registered_context_engine(project_registrations)
+    database = SQLiteDatabase(database_path)
+    application.state.database = database
+    source_record_store = SQLiteSourceRecordStore(database)
+    application.state.source_record_store = source_record_store
+    wiki_draft_store = SQLiteWikiDraftStore(database)
+    risk_store = SQLiteRiskStore(database)
+    risk_engine = RiskEngine(risk_store)
+    risk_feedback_store = SQLiteRiskFeedbackStore(database)
+    context_engine, evidence_index = build_registered_context_engine(
+        project_registrations,
+        risk_engine=risk_engine,
+        source_store=source_record_store,
+    )
     application.state.context_engine = context_engine
     application.state.evidence_index = evidence_index
     application.state.local_project_registrations = project_registrations
+    connector_sync_state_store = ConnectorSyncStateStore(database)
+    connector_sync_service = ConnectorSyncService(
+        evidence_index=evidence_index,
+        state_store=connector_sync_state_store,
+        source_store=source_record_store,
+        freshness_max_age_seconds=settings.connector_freshness_max_age_seconds,
+    )
+    application.state.connector_sync_state_store = connector_sync_state_store
+    application.state.connector_sync_service = connector_sync_service
+    application.state.wiki_draft_store = wiki_draft_store
+    application.state.wiki_draft_compiler = WikiDraftCompiler(
+        source_record_store, wiki_draft_store
+    )
     resolver_registrations = to_project_registrations(project_registrations)
     default_project = resolver_registrations[0].project
-    engineering_root = _default_engineering_root(project_registrations)
-    engineering_skill = (
-        ProjectEngineeringSkill.for_project_root(engineering_root, allow_apply=False)
-        if engineering_root is not None
-        else None
-    )
-    database = SQLiteDatabase(database_path)
     event_sink = SQLiteEventSink(database)
     lifecycle = LifecycleBus(event_sink=event_sink)
+    application.state.event_sink = event_sink
     application.state.lifecycle_bus = lifecycle
+    # Stub/live adapter kept for observability and tests; ask runtime is Hermes-only.
     model_adapter = create_model_adapter_from_settings(settings)
-    workflow = ProjectWorkflow(
-        ProjectResolver(resolver_registrations),
-        context_engine,
-        engineering_skill=engineering_skill,
-        lifecycle=lifecycle,
-        model_adapter=model_adapter,
-    )
     project_registry = registry_from_local_registrations(project_registrations)
     spaces_dir = base_dir / settings.project_spaces_dir
     for space in load_project_spaces_from_dir(spaces_dir, base_dir=base_dir):
@@ -128,63 +189,90 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
     runtime_context_resolver = ProjectRuntimeContextResolver(
         project_registry=project_registry,
     )
-    investigation_agent = ProjectInvestigationAgent(
-        context_engine=context_engine,
-        project_registry=project_registry,
-        lifecycle=lifecycle,
-    )
     run_repository = SQLiteRunRepository(database)
+    embedding_provider = build_embedding_provider(settings)
+    embedding_cache = SQLiteEmbeddingCache(database) if embedding_provider else None
+    history_store = SQLiteHistoryMemoryStore(
+        database,
+        vector_scorer=(
+            EpisodeEmbeddingScorer(embedding_provider, cache=embedding_cache)
+            if embedding_provider
+            else None
+        ),
+    )
     run_service = RunService(
         run_repository,
-        workflow,
-        event_sink,
+        event_sink=event_sink,
         lifecycle=lifecycle,
-        investigation_agent=investigation_agent,
-        agent_mode=settings.agent_mode,
+        agent_mode="hermes",
+        history_store=history_store,
     )
-    # Hermes/MCP one-shot path always uses read_agent + ProjectInvestigationAgent.
-    ask_run_service = RunService(
-        run_repository,
-        workflow,
-        event_sink,
-        lifecycle=lifecycle,
-        investigation_agent=investigation_agent,
-        agent_mode="read_agent",
-    )
-    project_agent_ask_service = ProjectAgentAskService(
-        run_service=ask_run_service,
-        project_registry=project_registry,
-    )
-    project_agent_role_view_service = ProjectAgentRoleViewService(
-        run_service=ask_run_service,
+    memory_store = SQLiteMemoryStore(database)
+    memory_vector_scorer = (
+        MemoryEmbeddingScorer(embedding_provider, cache=embedding_cache)
+        if embedding_provider
+        else None
     )
     project_agent_tool_service = ProjectAgentToolService(
         context_engine=context_engine,
         project_registry=project_registry,
+        memory_store=memory_store,
+        run_repository=run_repository,
+        event_sink=event_sink,
+        history_store=history_store,
+        memory_vector_scorer=memory_vector_scorer,
+        advanced_tools_enabled=settings.feishu_hermes_advanced_tools,
     )
-    hermes_tool_loop_bridge = (
-        FeishuHermesToolLoopBridge(
-            tool_service=project_agent_tool_service,
-            config=ProjectLensPluginConfig.from_env(),
-            hermes_repo=settings.hermes_repo,
-            hermes_provider=settings.feishu_hermes_provider,
-            hermes_model=settings.feishu_hermes_model,
-        )
-        if settings.feishu_use_hermes_tool_loop
-        else None
+    project_space_inspect_service = ProjectSpaceInspectService(
+        project_registry=project_registry,
+    )
+    hermes_tool_loop_bridge = FeishuHermesToolLoopBridge(
+        tool_service=project_agent_tool_service,
+        config=ProjectLensPluginConfig.from_env(),
+        lifecycle=lifecycle,
+        hermes_repo=settings.hermes_repo,
+        hermes_provider=settings.feishu_hermes_provider,
+        hermes_model=settings.feishu_hermes_model,
+        hermes_base_url=(
+            settings.feishu_hermes_base_url or settings.model_openai_base_url
+        ),
+        hermes_api_key=(
+            settings.feishu_hermes_api_key or settings.model_openai_api_key
+        ),
+    )
+    hermes_runtime_service = HermesRuntimeService(
+        run_service=run_service,
+        bridge=hermes_tool_loop_bridge,
+    )
+    project_agent_ask_service = ProjectAgentAskService(
+        hermes_runtime=hermes_runtime_service,
+        project_registry=project_registry,
+        runtime_context_resolver=runtime_context_resolver,
+    )
+    project_agent_role_view_service = ProjectAgentRoleViewService(
+        run_service=run_service,
+    )
+    project_agent_run_detail_service = ProjectAgentRunDetailService(
+        run_service=run_service,
+        project_runtime_context_resolver=runtime_context_resolver,
     )
     application.state.model_adapter = model_adapter
     application.state.project_registry = project_registry
     application.state.project_runtime_context_resolver = runtime_context_resolver
-    application.state.investigation_agent = investigation_agent
     application.state.run_service = run_service
-    application.state.ask_run_service = ask_run_service
+    application.state.hermes_runtime_service = hermes_runtime_service
     application.state.project_agent_ask_service = project_agent_ask_service
     application.state.project_agent_role_view_service = project_agent_role_view_service
+    application.state.project_agent_run_detail_service = project_agent_run_detail_service
     application.state.project_agent_tool_service = project_agent_tool_service
+    application.state.project_space_inspect_service = project_space_inspect_service
     application.state.feishu_hermes_tool_loop_bridge = hermes_tool_loop_bridge
+    application.state.hermes_tool_loop_enabled = True
     application.state.approval_store = SQLiteApprovalStore(database)
-    application.state.memory_store = SQLiteMemoryStore(database)
+    application.state.engineering_approval_store = SQLiteEngineeringApprovalStore(database)
+    application.state.hermes_execution_enabled = settings.feishu_hermes_execution_enabled
+    application.state.memory_store = memory_store
+    application.state.history_memory_store = history_store
     memory_approval_gateway = MemoryApprovalGateway(application.state.memory_store)
     application.state.memory_approval_gateway = memory_approval_gateway
     sync_status_store = SQLiteFeishuDocSyncStatusStore(database)
@@ -207,6 +295,22 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         )
     else:
         messenger = RecordingFeishuMessenger()
+    wiki_publisher = RecordingWikiPublisher()
+    if (
+        settings.feishu_wiki_publish_enabled
+        and token_provider is not None
+        and settings.feishu_wiki_space_id
+    ):
+        wiki_publisher = FeishuWikiPublisher(
+            token_provider=token_provider,
+            space_id=settings.feishu_wiki_space_id,
+            parent_node_token=settings.feishu_wiki_parent_node_token,
+            base_url=settings.feishu_api_base_url,
+        )
+    application.state.wiki_publisher = wiki_publisher
+    application.state.wiki_draft_workflow = WikiDraftWorkflowService(
+        wiki_draft_store, wiki_publisher
+    )
     application.state.feishu_credentials_configured = bool(
         settings.feishu_app_id and settings.feishu_app_secret
     )
@@ -215,6 +319,57 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
     )
     application.state.feishu_binding_count = identity_mapper.binding_count
     application.state.feishu_messenger = messenger
+    application.state.project_connector_factory = ProjectConnectorFactory(
+        project_registry=project_registry,
+        feishu_token_provider=token_provider,
+        feishu_base_url=settings.feishu_api_base_url,
+        github_token=settings.github_token,
+        github_api_base_url=settings.github_api_base_url,
+    )
+    risk_feedback_service = RiskFeedbackService(
+        risk_engine=risk_engine,
+        store=risk_feedback_store,
+        authorizer=ProjectSpaceRiskFeedbackAuthorizer(project_registry),
+    )
+    risk_notification_service = RiskNotificationService(
+        messenger=messenger,
+        feedback_store=risk_feedback_store,
+        risk_engine=risk_engine,
+        recipient_directory=ProjectRiskRecipientDirectory(project_registry),
+        runtime_context_resolver=runtime_context_resolver,
+    )
+    application.state.risk_store = risk_store
+    application.state.risk_engine = risk_engine
+    application.state.risk_feedback_store = risk_feedback_store
+    application.state.risk_feedback_service = risk_feedback_service
+    application.state.risk_notification_service = risk_notification_service
+    hermes_risk_review = HermesRiskReviewScheduler(
+        risk_engine=risk_engine,
+        review_store=SQLiteHermesRiskReviewStore(database),
+    )
+    access_scopes = {item.project: item.access_scope for item in project_registrations}
+    background_risk_scheduler = HermesRiskBackgroundScheduler(
+        projects=tuple(item.project for item in project_registrations),
+        review_scheduler=hermes_risk_review,
+        evidence_provider=lambda project: context_engine.authorized_evidence(
+            project,
+            AccessContext(
+                tenant_id=project.tenant_id,
+                user_id="hermes-background",
+                permissions=frozenset({
+                    access_scopes.get(project, "")
+                }),
+            ),
+            limit=50,
+        ),
+        on_startup=settings.feishu_hermes_risk_review_enabled,
+        interval_seconds=(
+            settings.feishu_hermes_risk_review_interval_seconds
+            if settings.feishu_hermes_risk_review_enabled
+            else 0
+        ),
+    )
+    attach_risk_scheduler_to_app(application, background_risk_scheduler)
     doc_client = (
         FeishuDocClient(
             token_provider=token_provider,
@@ -227,6 +382,7 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         client=doc_client,
         index=evidence_index,
         status_store=sync_status_store,
+        source_store=source_record_store,
     )
     application.state.feishu_doc_sync_service = sync_service
     attach_scheduler_to_app(
@@ -262,13 +418,23 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         lifecycle=lifecycle,
         runtime_context_resolver=runtime_context_resolver,
         hermes_tool_loop_bridge=hermes_tool_loop_bridge,
+        hermes_runtime=hermes_runtime_service,
+        run_detail_service=project_agent_run_detail_service,
+        risk_feedback_service=risk_feedback_service,
+        risk_engine=risk_engine,
+        risk_notification_service=risk_notification_service,
     )
     application.include_router(router, prefix=settings.api_prefix)
     application.include_router(project_agent_router, prefix=settings.api_prefix)
+    application.include_router(hermes_execution_router, prefix=settings.api_prefix)
     application.include_router(feishu_router, prefix=settings.api_prefix)
     application.include_router(feishu_status_router, prefix=settings.api_prefix)
     application.include_router(approval_router, prefix=settings.api_prefix)
     application.include_router(memory_router, prefix=settings.api_prefix)
+    if isolation_active() or settings.test_mode:
+        application.add_middleware(TrustedActorTestMiddleware)
+    elif settings.env.strip().lower() in {"production", "pilot"}:
+        application.add_middleware(ServiceAuthMiddleware)
     return application
 
 
@@ -277,15 +443,6 @@ def _build_conversation_store(database: SQLiteDatabase) -> ConversationStore:
     if backend in {"memory", "inmemory", "in_memory"}:
         return InMemoryConversationStore()
     return SQLiteConversationStore(database)
-
-
-def _default_engineering_root(registrations: tuple) -> Path | None:
-    if not registrations:
-        return None
-    repository_root: Path = registrations[0].sources.repository_root
-    if repository_root.name == "src":
-        return repository_root.parent
-    return repository_root
 
 
 app = create_app(settings.database_path)

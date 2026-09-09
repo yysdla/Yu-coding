@@ -26,7 +26,9 @@ def provider_config_from_settings(settings: Any) -> ProviderRuntimeConfig:
             f"unknown model_provider={kind_raw!r}; "
             f"expected one of {[item.value for item in ProviderKind]}"
         ) from exc
-    live_requested = _as_bool(getattr(settings, "model_live", False), default=False)
+    from project_lens.config import effective_model_live
+
+    live_requested = effective_model_live(settings)
     fallback = _as_bool(getattr(settings, "model_fallback_to_stub", True), default=True)
     config = ProviderRuntimeConfig(
         kind=kind,

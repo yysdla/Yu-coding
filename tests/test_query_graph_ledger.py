@@ -23,8 +23,10 @@ class _FakeGateway:
         project: ProjectRef,
         access: AccessContext,
         query: GraphQuery,
+        *,
+        scope=None,  # noqa: ANN001
     ) -> tuple[GraphEvidence, ...]:
-        del project, access, query
+        del project, access, query, scope
         return self._paths
 
 

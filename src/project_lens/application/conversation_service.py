@@ -95,6 +95,10 @@ class ConversationService:
     ) -> tuple[str, str | None]:
         """Return (question_for_run, followup_rewrite_or_none)."""
 
+        from project_lens.workflow.skills import skill_routing_enabled
+
+        if not skill_routing_enabled():
+            return (text, None)
         followup = self._rewriter.rewrite(text, session)
         return (followup or text, followup)
 
@@ -188,9 +192,9 @@ class ConversationService:
         }
         if merged_task is not None:
             scratchpad = scratchpad_to_session_dict(merged_task)
-            prior_access = session.task_scratchpad.get("runtime_access")
-            if prior_access is not None:
-                scratchpad["runtime_access"] = prior_access
+            current_access = session.task_scratchpad.get("runtime_access")
+            if current_access is not None:
+                scratchpad["runtime_access"] = current_access
             update["task_scratchpad"] = scratchpad
         updated = session.model_copy(update=update)
         saved = self._store.upsert(updated)
@@ -199,6 +203,35 @@ class ConversationService:
             saved,
             run_id=run_id,
         )
+        return saved
+
+    def attach_hermes_tool_loop(
+        self,
+        session: ConversationSession,
+        entry: dict[str, object],
+        *,
+        keep_last: int = 5,
+    ) -> ConversationSession:
+        """Persist a compact Hermes tool-loop audit pointer on the session scratchpad.
+
+        Does not create an AgentRun. ``loop_id`` is a synthetic key for agent_events.
+        """
+
+        recent = [
+            item
+            for item in (session.task_scratchpad.get("hermes_tool_loops") or [])
+            if isinstance(item, dict)
+        ]
+        recent.append(dict(entry))
+        recent = recent[-max(1, keep_last) :]
+        merged = {
+            **session.task_scratchpad,
+            "hermes_tool_loop": dict(entry),
+            "hermes_tool_loops": recent,
+        }
+        updated = session.model_copy(update={"task_scratchpad": merged})
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
         return saved
 
     def _emit_session_event(

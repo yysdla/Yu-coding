@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from project_lens.application.audience_views import AudienceAnswer
 from project_lens.domain.models import AgentRun, ClaimType, ProjectAnswer
 from project_lens.integrations.feishu.audiences import AnswerAudience, audience_label
 from project_lens.integrations.feishu.views import (
@@ -41,6 +42,45 @@ def render_role_view_elements(
     if audience == AnswerAudience.ONBOARDING:
         return _onboarding_elements(run, answer)
     return _team_elements(run, answer, view=view)
+
+
+def render_audience_view_elements(
+    run: AgentRun,
+    view: AudienceAnswer,
+) -> list[dict[str, object]]:
+    """Render a concise answer body; sources and runtime details are opt-in views."""
+
+    elements = [
+        _markdown(f"**你问的是**\n{_short_question(run.question)}"),
+        _markdown(view.conclusion),
+    ]
+    details = _audience_answer_detail_lines(view)
+    if details:
+        elements.append(_markdown("\n".join(details)))
+    return elements
+
+
+def _audience_answer_detail_lines(view: AudienceAnswer, *, limit: int = 5) -> list[str]:
+    """Keep the default card conversational instead of exposing a fixed report schema."""
+
+    lines: list[str] = []
+    seen: set[str] = {view.conclusion.strip()}
+    for section in view.sections:
+        for item in section.items:
+            text = item.strip()
+            if text and text not in seen:
+                lines.append(f"- {text}")
+                seen.add(text)
+            if len(lines) >= limit:
+                return lines
+    for item in view.unknowns:
+        text = item.strip()
+        if text and text not in seen:
+            lines.append(f"- 仍待确认：{text}")
+            seen.add(text)
+        if len(lines) >= limit:
+            break
+    return lines
 
 
 def source_summary_line(answer: ProjectAnswer) -> str:

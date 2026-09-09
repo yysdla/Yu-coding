@@ -19,6 +19,7 @@ from project_lens.domain.models import (
 )
 from project_lens.graph.models import GraphNodeKind
 from project_lens.graph.query import GraphQuery
+from project_lens.project_space.policies import EffectiveAccessScope, source_path_allowed
 from project_lens.runtime.read_gateway import ReadContextGateway
 from project_lens.runtime.tool_gateway import ToolGateway
 from project_lens.runtime.tools import BaseTool, ToolRegistry
@@ -83,46 +84,27 @@ def build_investigation_tool_registry(
     tool_gateway: ToolGateway | None,
     ledger: InvestigationLedger,
     access_scope: str,
+    effective_scope: EffectiveAccessScope | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register(
-        SearchContextTool(
-            project=project,
-            access=access,
-            gateway=read_gateway,
-            ledger=ledger,
-        )
-    )
-    registry.register(
-        AuthorizedEvidenceTool(
-            project=project,
-            access=access,
-            gateway=read_gateway,
-            ledger=ledger,
-        )
-    )
-    registry.register(
-        ListKnowledgeGapsTool(
-            project=project,
-            access=access,
-            gateway=read_gateway,
-            ledger=ledger,
-        )
-    )
-    registry.register(
-        QueryGraphTool(
-            project=project,
-            access=access,
-            gateway=read_gateway,
-            ledger=ledger,
-        )
-    )
+    gateway_kwargs = {
+        "project": project,
+        "access": access,
+        "gateway": read_gateway,
+        "ledger": ledger,
+        "effective_scope": effective_scope,
+    }
+    registry.register(SearchContextTool(**gateway_kwargs))
+    registry.register(AuthorizedEvidenceTool(**gateway_kwargs))
+    registry.register(ListKnowledgeGapsTool(**gateway_kwargs))
+    registry.register(QueryGraphTool(**gateway_kwargs))
     if tool_gateway is not None:
         file_kwargs = {
             "project": project,
             "gateway": tool_gateway,
             "ledger": ledger,
             "access_scope": access_scope,
+            "effective_scope": effective_scope,
         }
         registry.register(ReadProjectFileTool(**file_kwargs))
         registry.register(ListProjectFilesTool(**file_kwargs))
@@ -145,11 +127,13 @@ class SearchContextTool(BaseTool):
         access: AccessContext,
         gateway: ReadContextGateway,
         ledger: InvestigationLedger,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._access = access
         self._gateway = gateway
         self._ledger = ledger
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -168,6 +152,7 @@ class SearchContextTool(BaseTool):
         bundle = self._gateway.search_context(
             ContextQuery(text=query, project=self._project, limit=min(max(limit, 1), 20)),
             self._access,
+            scope=self._scope,
         )
         self._ledger.add_many(bundle.evidence)
         self._ledger.record_tool(
@@ -200,11 +185,13 @@ class AuthorizedEvidenceTool(BaseTool):
         access: AccessContext,
         gateway: ReadContextGateway,
         ledger: InvestigationLedger,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._access = access
         self._gateway = gateway
         self._ledger = ledger
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -217,7 +204,10 @@ class AuthorizedEvidenceTool(BaseTool):
     async def execute(self, **kwargs: Any) -> str:
         limit = int(kwargs.get("limit") or 20)
         evidence = self._gateway.authorized_evidence(
-            self._project, self._access, limit=min(max(limit, 1), 50)
+            self._project,
+            self._access,
+            limit=min(max(limit, 1), 50),
+            scope=self._scope,
         )
         self._ledger.add_many(evidence)
         self._ledger.record_tool(self.name, {"hit_count": len(evidence)})
@@ -246,11 +236,13 @@ class ListKnowledgeGapsTool(BaseTool):
         access: AccessContext,
         gateway: ReadContextGateway,
         ledger: InvestigationLedger,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._access = access
         self._gateway = gateway
         self._ledger = ledger
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -261,7 +253,11 @@ class ListKnowledgeGapsTool(BaseTool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        report = self._gateway.list_knowledge_gaps(self._project, self._access)
+        report = self._gateway.list_knowledge_gaps(
+            self._project,
+            self._access,
+            scope=self._scope,
+        )
         self._ledger.record_tool(self.name, {"gap_count": len(report.gaps)})
         gaps = [
             {
@@ -287,11 +283,13 @@ class QueryGraphTool(BaseTool):
         access: AccessContext,
         gateway: ReadContextGateway,
         ledger: InvestigationLedger,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._access = access
         self._gateway = gateway
         self._ledger = ledger
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -321,7 +319,10 @@ class QueryGraphTool(BaseTool):
             limit=min(max(int(kwargs.get("limit") or 5), 1), 20),
         )
         paths: tuple[GraphEvidence, ...] = self._gateway.query_graph(
-            self._project, self._access, query
+            self._project,
+            self._access,
+            query,
+            scope=self._scope,
         )
         cited_count = 0
         for path in paths:
@@ -359,11 +360,13 @@ class ReadProjectFileTool(BaseTool):
         gateway: ToolGateway,
         ledger: InvestigationLedger,
         access_scope: str,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._gateway = gateway
         self._ledger = ledger
         self._access_scope = access_scope
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -375,6 +378,7 @@ class ReadProjectFileTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> str:
         relative = str(kwargs["path"]).replace("\\", "/").lstrip("./")
+        _enforce_file_scope(self._scope, self.name, relative)
         content = self._gateway.read_project_file(relative)
         clipped = content[:8000]
         digest = sha256(clipped.encode("utf-8")).hexdigest()
@@ -437,11 +441,13 @@ class ListProjectFilesTool(BaseTool):
         gateway: ToolGateway,
         ledger: InvestigationLedger,
         access_scope: str,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._gateway = gateway
         self._ledger = ledger
         self._access_scope = access_scope
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -457,6 +463,7 @@ class ListProjectFilesTool(BaseTool):
     async def execute(self, **kwargs: Any) -> str:
         prefix = str(kwargs.get("prefix") or "src/")
         limit = int(kwargs.get("limit") or 50)
+        _enforce_file_scope(self._scope, self.name, prefix)
         files = self._gateway.list_project_files(prefix=prefix, limit=limit)
         listing = "\n".join(files) if files else "(no files)"
         evidence = _code_snippet_evidence(
@@ -494,11 +501,13 @@ class GrepProjectCodeTool(BaseTool):
         gateway: ToolGateway,
         ledger: InvestigationLedger,
         access_scope: str,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._gateway = gateway
         self._ledger = ledger
         self._access_scope = access_scope
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -516,6 +525,7 @@ class GrepProjectCodeTool(BaseTool):
         pattern = str(kwargs["pattern"])
         prefix = str(kwargs.get("prefix") or "src/")
         limit = int(kwargs.get("limit") or 20)
+        _enforce_file_scope(self._scope, self.name, prefix)
         hits = self._gateway.grep_project_code(pattern, prefix=prefix, limit=limit)
         return self._pack_hits(pattern=pattern, prefix=prefix, hits=hits)
 
@@ -556,6 +566,7 @@ class SearchProjectCodeTool(GrepProjectCodeTool):
         pattern = str(kwargs["pattern"])
         prefix = str(kwargs.get("prefix") or "src/")
         limit = int(kwargs.get("limit") or 20)
+        _enforce_file_scope(self._scope, self.name, prefix)
         hits = self._gateway.search_project_code(pattern, prefix=prefix, limit=limit)
         return self._pack_hits(pattern=pattern, prefix=prefix, hits=hits)
 
@@ -573,11 +584,13 @@ class ReadProjectFileRangeTool(BaseTool):
         gateway: ToolGateway,
         ledger: InvestigationLedger,
         access_scope: str,
+        effective_scope: EffectiveAccessScope | None = None,
     ) -> None:
         self._project = project
         self._gateway = gateway
         self._ledger = ledger
         self._access_scope = access_scope
+        self._scope = effective_scope
 
     def parameters_schema(self) -> dict[str, Any]:
         return {
@@ -593,6 +606,7 @@ class ReadProjectFileRangeTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> str:
         relative = str(kwargs["path"]).replace("\\", "/").lstrip("./")
+        _enforce_file_scope(self._scope, self.name, relative)
         start = int(kwargs.get("start_line") or 1)
         end = int(kwargs.get("end_line") or start + 79)
         payload = self._gateway.read_project_file_range(
@@ -628,3 +642,25 @@ class ReadProjectFileRangeTool(BaseTool):
             },
             ensure_ascii=False,
         )
+
+
+def _enforce_file_scope(
+    scope: EffectiveAccessScope | None,
+    tool_name: str,
+    relative_path: str,
+) -> None:
+    if scope is None:
+        raise PermissionError("effective access scope is required")
+    allowed = tool_name in scope.allowed_tools or (
+        tool_name in {
+            "list_project_files",
+            "grep_project_code",
+            "search_project_code",
+            "read_project_file_range",
+        }
+        and "read_project_file" in scope.allowed_tools
+    )
+    if not allowed:
+        raise PermissionError(f"tool {tool_name} is not allowed for this scope")
+    if not source_path_allowed(scope, relative_path):
+        raise PermissionError("source path is outside readable effective scope")

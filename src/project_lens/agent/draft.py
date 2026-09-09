@@ -1,4 +1,4 @@
-"""Structured answer draft produced by ProjectInvestigationAgent."""
+"""Structured answer draft produced for citation verification."""
 
 from __future__ import annotations
 
@@ -19,9 +19,12 @@ class AnswerDraft(BaseModel):
     facts: list[DraftFact] = Field(default_factory=list)
     inferences: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
+    impact: list[str] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
+    conclusion: str = ""
     business_summary: str = ""
     technical_summary: str = ""
+    policy_used: str = ""
     tools_used: list[str] = Field(default_factory=list)
     stop_reason: str = "stop"
 
@@ -57,11 +60,14 @@ class AnswerDraft(BaseModel):
             facts=facts,
             inferences=[str(x) for x in (payload.get("inferences") or []) if str(x).strip()],
             unknowns=[str(x) for x in (payload.get("unknowns") or []) if str(x).strip()],
+            impact=[str(x) for x in (payload.get("impact") or []) if str(x).strip()],
             next_actions=[
                 str(x) for x in (payload.get("next_actions") or []) if str(x).strip()
             ],
+            conclusion=str(payload.get("conclusion") or ""),
             business_summary=str(payload.get("business_summary") or ""),
             technical_summary=str(payload.get("technical_summary") or ""),
+            policy_used=str(payload.get("policy_used") or ""),
             tools_used=[str(x) for x in (payload.get("tools_used") or [])],
             stop_reason=str(payload.get("stop_reason") or "stop"),
         )

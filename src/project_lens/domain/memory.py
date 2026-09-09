@@ -85,3 +85,44 @@ class ProjectMemory(FrozenModel):
     valid_from: datetime = Field(default_factory=utc_now)
     valid_to: datetime | None = None
     proposal_id: UUID | None = None
+
+
+class MemoryObservationKind(StrEnum):
+    TOOL_RESULT = "tool_result"
+    TOOL_DENIED = "tool_denied"
+    STATUS_CHANGE = "status_change"
+    RUN_OUTCOME = "run_outcome"
+
+
+class MemoryObservation(FrozenModel):
+    """Historical observation derived from an AgentEvent.
+
+    This is not an approved ProjectMemory and must never be promoted silently.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    project: ProjectRef
+    run_id: UUID
+    observed_at: datetime
+    kind: MemoryObservationKind
+    text: str = Field(min_length=1, max_length=1_000)
+    tool_name: str | None = Field(default=None, max_length=120)
+    event_type: str = Field(min_length=1, max_length=100)
+    evidence_ids: tuple[UUID, ...] = ()
+    source_event_payload_keys: tuple[str, ...] = ()
+
+
+class Episode(FrozenModel):
+    """Bounded historical summary for one AgentRun."""
+
+    id: UUID = Field(default_factory=uuid4)
+    project: ProjectRef
+    run_id: UUID
+    title: str = Field(min_length=1, max_length=240)
+    summary: str = Field(default="", max_length=2_000)
+    started_at: datetime
+    ended_at: datetime
+    status: str = Field(min_length=1, max_length=50)
+    tool_names: tuple[str, ...] = ()
+    evidence_ids: tuple[UUID, ...] = ()
+    observation_ids: tuple[UUID, ...] = ()

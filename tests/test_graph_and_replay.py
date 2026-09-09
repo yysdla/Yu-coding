@@ -1,11 +1,11 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from project_lens.context.bootstrap import LocalContextSources, build_local_context_engine
-from project_lens.domain.models import ProjectAnswer, ProjectRef
-from project_lens.evaluation.answer_metrics import answer_metrics
+from project_lens.domain.models import ProjectRef
 from project_lens.evaluation.replay import replay_cases
 from project_lens.graph import EvidenceGraphBuilder
 from project_lens.graph.models import GraphNodeKind
@@ -50,7 +50,7 @@ def test_demo_evidence_graph_contains_service_symbol_and_relations() -> None:
     )
 
 
-def test_completed_answer_has_full_citation_and_approval_metrics() -> None:
+def test_legacy_run_execute_is_blocked_for_hermes_app() -> None:
     client = TestClient(create_app())
     response = client.post(
         "/api/v1/runs",
@@ -65,15 +65,12 @@ def test_completed_answer_has_full_citation_and_approval_metrics() -> None:
             "question": TRACEBACK,
         },
     )
-    run = client.post(f"/api/v1/runs/{response.json()['run_id']}/execute").json()
-
-    metrics = answer_metrics(ProjectAnswer.model_validate(run["answer"]))
-    assert metrics["citation_coverage"] == 1.0
-    assert metrics["evidence_precision"] == 1.0
-    assert metrics["all_actions_require_approval"] is True
+    executed = client.post(f"/api/v1/runs/{response.json()['run_id']}/execute")
+    assert executed.status_code == 409
+    assert "Hermes" in executed.json()["detail"]
 
 
-def test_incident_replay_reports_completion_rate() -> None:
+def test_incident_replay_reports_hermes_execute_block() -> None:
     app = create_app()
     project = ProjectRef(
         tenant_id="demo",
@@ -81,15 +78,12 @@ def test_incident_replay_reports_completion_rate() -> None:
         service="order-service",
         environment="production",
     )
-    result = asyncio.run(
-        replay_cases(
-            app.state.run_service,
-            project=project,
-            user_id="replay",
-            cases=[{"id": "incident-1", "question": TRACEBACK}],
+    with pytest.raises(RuntimeError, match="Hermes"):
+        asyncio.run(
+            replay_cases(
+                app.state.run_service,
+                project=project,
+                user_id="replay",
+                cases=[{"id": "incident-1", "question": TRACEBACK}],
+            )
         )
-    )
-
-    assert result["case_count"] == 1
-    assert result["completed_count"] == 1
-    assert result["completion_rate"] == 1.0

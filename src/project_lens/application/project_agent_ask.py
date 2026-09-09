@@ -10,8 +10,12 @@ from project_lens.application.answer_envelope import (
     project_answer_to_envelope,
     recoverable_error,
 )
-from project_lens.application.run_service import RunService
+from project_lens.application.hermes_runtime import HermesRuntimeService
+from project_lens.domain.identity import ActorContext
 from project_lens.domain.models import ProjectRef, RunStatus
+from project_lens.project_space.policies import (
+    ProjectRuntimeContextResolver,
+)
 from project_lens.project_space.registry import ProjectRegistry
 
 # Conservative write/apply intents — avoid matching read-only docs about deploy.
@@ -50,13 +54,16 @@ class ProjectAgentAskRequest:
     project: ProjectRef
     user_id: str = "mcp-user"
     channel_id: str | None = None
+    chat_type: str = "group"
+    identity_source: str = "member_directory"
     audience: str = "team"
     mode: str = "read_only"
     format: str = "concise"
+    actor: ActorContext | None = None
 
 
 class ProjectAgentAskService:
-    """Thin adapter: gates -> RunService(read_agent) -> compact envelope.
+    """Thin adapter: gates -> HermesRuntimeService -> compact envelope.
 
     Does not query EvidenceIndex / graph / ops stores directly.
     Does not invent facts.
@@ -65,19 +72,19 @@ class ProjectAgentAskService:
     def __init__(
         self,
         *,
-        run_service: RunService,
+        hermes_runtime: HermesRuntimeService,
         project_registry: ProjectRegistry,
+        runtime_context_resolver: ProjectRuntimeContextResolver | None = None,
     ) -> None:
-        if run_service.agent_mode != "read_agent":
-            raise ValueError(
-                "ProjectAgentAskService requires RunService with agent_mode='read_agent'"
-            )
-        self._run_service = run_service
+        self._hermes_runtime = hermes_runtime
         self._registry = project_registry
+        self._resolver = runtime_context_resolver or ProjectRuntimeContextResolver(
+            project_registry=project_registry,
+        )
 
     @property
-    def run_service(self) -> RunService:
-        return self._run_service
+    def run_service(self):  # noqa: ANN201 - preserves role-view adapter compatibility
+        return self._hermes_runtime.run_service
 
     @property
     def project_registry(self) -> ProjectRegistry:
@@ -162,31 +169,73 @@ class ProjectAgentAskService:
             environment=request.project.environment or space.project.environment,
         )
 
-        run = self._run_service.create(
+        actor = request.actor
+        if actor is None:
+            return recoverable_error(
+                error_code="TRUSTED_ACTOR_REQUIRED",
+                message="ProjectLens ask requires a trusted actor context.",
+                retryable=False,
+                agent_recovery_hint=(
+                    "Call through a trusted HTTP or Feishu ingress that binds "
+                    "identity before invoking the Hermes runtime."
+                ),
+                project=project,
+            )
+        if actor.tenant_key != project.tenant_id:
+            return recoverable_error(
+                error_code="ACCESS_DENIED",
+                message="trusted actor tenant does not match the requested project",
+                retryable=False,
+                agent_recovery_hint="Use a trusted actor for the project tenant.",
+                project=project,
+            )
+        chat_id = actor.chat_id
+        try:
+            resolved = self._resolver.resolve(
+                tenant_id=project.tenant_id,
+                project_id=project.project_id,
+                chat_id=chat_id,
+                user_id=actor.actor_id,
+                chat_type=actor.chat_type,
+                identity_source=actor.source,
+            )
+        except PermissionError as exc:
+            return recoverable_error(
+                error_code="ACCESS_DENIED",
+                message=str(exc),
+                retryable=False,
+                agent_recovery_hint=(
+                    "Use a project member account or ask the project admin to grant access."
+                ),
+                project=project,
+            )
+
+        execution = await self._hermes_runtime.execute(
             project=project,
-            user_id=request.user_id,
-            channel_id=request.channel_id,
+            actor=actor,
+            scope=resolved.effective_scope,
             question=question,
+            entry_mode="http_ask",
         )
-        executed = await self._run_service.execute(run.id)
+        executed = execution.run
         if executed is None:
             return recoverable_error(
                 error_code="RUN_NOT_FOUND",
-                message=f"run {run.id} disappeared after create",
+                message="Hermes run disappeared after create",
                 retryable=True,
                 agent_recovery_hint="Retry the ask request.",
                 project=project,
-                extras={"run_id": str(run.id), "trace_id": str(run.trace_id)},
             )
 
-        events = self._run_service.events(executed.id)
+        events = self._hermes_runtime.run_service.events(executed.id)
         if executed.status == RunStatus.FAILED or executed.answer is None:
             return recoverable_error(
-                error_code="INVESTIGATION_FAILED",
-                message=executed.error or "project investigation failed without an answer",
+                error_code="HERMES_UNAVAILABLE",
+                message=executed.error or "Hermes failed without a verified answer",
                 retryable=True,
                 agent_recovery_hint=(
-                    "Retry later, or ask a narrower read-only question with file/module hints."
+                    "Retry later, or ask a narrower read-only question with file/module hints. "
+                    "ProjectLens did not fall back to a legacy runtime."
                 ),
                 project=project,
                 extras={
@@ -196,16 +245,11 @@ class ProjectAgentAskService:
                 },
             )
 
-        tool_names: tuple[str, ...] = ()
-        investigation = getattr(self._run_service, "_investigation", None)
-        if investigation is not None:
-            tool_names = tuple(getattr(investigation, "last_tool_names", ()) or ())
-
         return project_answer_to_envelope(
             run=executed,
             answer=executed.answer,
             events=events,
-            tool_names=tool_names or None,
+            tool_names=execution.tool_names or None,
             audience=request.audience,
             format=request.format,
         )

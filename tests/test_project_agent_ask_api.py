@@ -7,70 +7,89 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from project_lens.agent.investigation import ProjectInvestigationAgent
+from project_lens.application.hermes_runtime import HermesRuntimeService
 from project_lens.application.project_agent_ask import (
     ProjectAgentAskRequest,
     ProjectAgentAskService,
     detects_write_intent,
 )
 from project_lens.application.run_service import InMemoryRunRepository, RunService
-from project_lens.context.bootstrap import (
-    build_registered_context_engine,
-    default_local_project_registrations,
-    to_project_registrations,
-)
+from project_lens.context.bootstrap import build_registered_context_engine, default_local_project_registrations
 from project_lens.context.engine import ContextEngine
 from project_lens.context.store import InMemoryEvidenceIndex
-from project_lens.domain.models import ProjectRef
+from project_lens.domain.identity import ActorContext
+from project_lens.domain.models import ProjectAnswer, ProjectRef
+from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopResult
 from project_lens.main import create_app
 from project_lens.project_space.models import ProjectSpace, RepositoryRef
+from project_lens.project_space.policies import ProjectMemberRolePolicy, RoleKind
 from project_lens.project_space.registry import (
     ProjectRegistry,
     load_project_spaces_from_dir,
     registry_from_local_registrations,
 )
-from project_lens.runtime.events import AgentEventType, InMemoryEventSink
+from project_lens.runtime.events import InMemoryEventSink
 from project_lens.runtime.lifecycle import LifecycleBus
-from project_lens.runtime.read_gateway import ReadContextGateway
-from project_lens.workflow.orchestrator import ProjectWorkflow
-from project_lens.workflow.resolver import ProjectResolver
-from tests.investigation_settings import stub_investigation_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _build_ask_service() -> tuple[ProjectAgentAskService, ProjectInvestigationAgent, RunService]:
+def _actor(*, project: ProjectRef | None = None) -> ActorContext:
+    return ActorContext(
+        tenant_key=(project.tenant_id if project is not None else "demo"),
+        actor_id="u1",
+        chat_id="test-ask-chat",
+        chat_type="group",
+        source="test_fixture",
+        authenticated=True,
+    )
+
+
+class _FakeHermesBridge:
+    async def answer(self, **kwargs):  # noqa: ANN003
+        project = kwargs["project"]
+        return FeishuHermesToolLoopResult(
+            ok=True,
+            envelope={"ok": True, "audit_ref": {"allow_apply": False}},
+            tool_names=("projectlens_search_context",),
+            loop_id=kwargs["loop_id"],
+            trace_id=kwargs["trace_id"],
+            verified_answer=ProjectAnswer(
+                project=project,
+                status="unknown",
+                business_summary="Evidence is insufficient.",
+                technical_summary="Evidence is insufficient.",
+                unknowns=("Need cited evidence.",),
+            ),
+        )
+
+
+def _install_fake_hermes(app) -> None:  # noqa: ANN001
+    app.state.feishu_hermes_tool_loop_bridge.answer = _FakeHermesBridge().answer
+
+
+def _build_ask_service() -> tuple[ProjectAgentAskService, RunService]:
     registrations = default_local_project_registrations(ROOT)
     engine, _index = build_registered_context_engine(registrations)
     registry = registry_from_local_registrations(registrations)
     for space in load_project_spaces_from_dir(ROOT / "config" / "projects", base_dir=ROOT):
-        if registry.get(space.tenant_id, space.project_id) is None:
-            registry.register(space)
+        registry.upsert(space)
 
     events = InMemoryEventSink()
     lifecycle = LifecycleBus(event_sink=events)
-    agent = ProjectInvestigationAgent(
-        context_engine=engine,
-        project_registry=registry,
-        read_gateway=ReadContextGateway(engine),
-        lifecycle=lifecycle,
-        app_settings=stub_investigation_settings(),
-    )
-    workflow = ProjectWorkflow(
-        ProjectResolver(to_project_registrations(registrations)),
-        engine,
-        lifecycle=lifecycle,
-    )
     run_service = RunService(
         InMemoryRunRepository(),
-        workflow,
         event_sink=events,
         lifecycle=lifecycle,
-        investigation_agent=agent,
-        agent_mode="read_agent",
+        agent_mode="hermes",
     )
-    ask = ProjectAgentAskService(run_service=run_service, project_registry=registry)
-    return ask, agent, run_service
+    ask = ProjectAgentAskService(
+        hermes_runtime=HermesRuntimeService(
+            run_service=run_service, bridge=_FakeHermesBridge()  # type: ignore[arg-type]
+        ),
+        project_registry=registry,
+    )
+    return ask, run_service
 
 
 def test_detects_write_intent_conservative() -> None:
@@ -85,7 +104,7 @@ def test_detects_write_intent_conservative() -> None:
 
 @pytest.mark.asyncio
 async def test_ask_service_free_question_returns_cited_envelope() -> None:
-    ask, agent, run_service = _build_ask_service()
+    ask, run_service = _build_ask_service()
     result = await ask.ask(
         ProjectAgentAskRequest(
             question="order_service.py 里 create_order 为什么要检查 coupon？",
@@ -96,6 +115,7 @@ async def test_ask_service_free_question_returns_cited_envelope() -> None:
                 environment="production",
             ),
             user_id="u1",
+            actor=_actor(),
         )
     )
     assert result["ok"] is True
@@ -103,38 +123,24 @@ async def test_ask_service_free_question_returns_cited_envelope() -> None:
     assert result["trace_id"]
     assert result["answer_summary"]
     assert result["audit_ref"]["allow_apply"] is False
-    assert result["audit_ref"]["agent_mode"] == "read_agent"
+    assert result["audit_ref"]["agent_mode"] == "hermes"
     assert result["role_views_available"]
     assert any(result["facts"]) or any(result["unknowns"])
     for fact in result["facts"]:
         assert fact["citations"]
     assert result["citations"] or result["unknowns"]
-    assert agent.last_tool_names
-
-    run_id = result["run_id"]
-    from uuid import UUID
-
-    events = run_service.events(UUID(run_id))
-    tool_events = [
-        event
-        for event in events
-        if event.type == AgentEventType.TOOL_COMPLETED
-        or (
-            event.type == AgentEventType.LIFECYCLE
-            and (event.payload or {}).get("lifecycle") == "tool.completed"
-        )
-    ]
-    assert tool_events
+    assert run_service.get(__import__("uuid").UUID(result["run_id"])) is not None
 
 
 @pytest.mark.asyncio
 async def test_ask_service_project_not_found() -> None:
-    ask, _agent, _run_service = _build_ask_service()
+    ask, _run_service = _build_ask_service()
     result = await ask.ask(
         ProjectAgentAskRequest(
             question="这个项目是做什么的？",
             project=ProjectRef(tenant_id="demo", project_id="does-not-exist"),
             user_id="u1",
+            actor=_actor(),
         )
     )
     assert result["ok"] is False
@@ -148,12 +154,13 @@ async def test_ask_service_project_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_ask_service_write_intent_denied() -> None:
-    ask, _agent, _run_service = _build_ask_service()
+    ask, _run_service = _build_ask_service()
     result = await ask.ask(
         ProjectAgentAskRequest(
             question="请帮我部署到生产并重启服务",
             project=ProjectRef(tenant_id="demo", project_id="payment"),
             user_id="u1",
+            actor=_actor(),
         )
     )
     assert result["ok"] is False
@@ -173,40 +180,40 @@ async def test_ask_service_no_evidence_returns_unknowns() -> None:
         repositories=(RepositoryRef(name="hollow", path=empty_root),),
         access_scope="project:hollow:read",
         file_allowlist=("src/",),
+        public_sources=("src/",),
+        members=(),
+        role_policies=(
+            ProjectMemberRolePolicy(
+                actor_id="u1",
+                project=ProjectRef(tenant_id="demo", project_id="hollow"),
+                role=RoleKind.DEVELOPER,
+                readable_sources=("src/",),
+                allowed_tools=("search_context", "read_project_file"),
+            ),
+        ),
     )
     registry = ProjectRegistry((space,))
     engine = ContextEngine(InMemoryEvidenceIndex())
     events = InMemoryEventSink()
     lifecycle = LifecycleBus(event_sink=events)
-    agent = ProjectInvestigationAgent(
-        context_engine=engine,
-        project_registry=registry,
-        read_gateway=ReadContextGateway(engine),
-        lifecycle=lifecycle,
-        app_settings=stub_investigation_settings(),
-    )
-    # Minimal workflow for RunService constructor (not used in read_agent mode).
-    registrations = default_local_project_registrations(ROOT)
-    payment_engine, _ = build_registered_context_engine(registrations)
-    workflow = ProjectWorkflow(
-        ProjectResolver(to_project_registrations(registrations)),
-        payment_engine,
-        lifecycle=lifecycle,
-    )
     run_service = RunService(
         InMemoryRunRepository(),
-        workflow,
         event_sink=events,
         lifecycle=lifecycle,
-        investigation_agent=agent,
-        agent_mode="read_agent",
+        agent_mode="hermes",
     )
-    ask = ProjectAgentAskService(run_service=run_service, project_registry=registry)
+    ask = ProjectAgentAskService(
+        hermes_runtime=HermesRuntimeService(
+            run_service=run_service, bridge=_FakeHermesBridge()  # type: ignore[arg-type]
+        ),
+        project_registry=registry,
+    )
     result = await ask.ask(
         ProjectAgentAskRequest(
             question="这个 hollow 项目的核心入口在哪里？",
             project=ProjectRef(tenant_id="demo", project_id="hollow"),
             user_id="u1",
+            actor=_actor(project=ProjectRef(tenant_id="demo", project_id="hollow")),
         )
     )
     assert result["ok"] is True
@@ -217,8 +224,10 @@ async def test_ask_service_no_evidence_returns_unknowns() -> None:
 
 def test_http_ask_creates_and_executes_run() -> None:
     app = create_app()
-    app.state.investigation_agent._settings = stub_investigation_settings()
+    _install_fake_hermes(app)
     client = TestClient(app)
+    from tests.conftest import project_agent_headers
+
     response = client.post(
         "/api/v1/project-agent/ask",
         json={
@@ -235,6 +244,7 @@ def test_http_ask_creates_and_executes_run() -> None:
             "mode": "read_only",
             "format": "concise",
         },
+        headers=project_agent_headers(actor_id="u1", chat_id="feishu-group-1"),
     )
     assert response.status_code == 200
     body = response.json()
@@ -242,28 +252,21 @@ def test_http_ask_creates_and_executes_run() -> None:
     assert body["run_id"]
     assert body["trace_id"]
     assert body["audit_ref"]["allow_apply"] is False
-    assert body["audit_ref"]["agent_mode"] == "read_agent"
+    assert body["audit_ref"]["agent_mode"] == "hermes"
     for fact in body.get("facts") or []:
         assert fact.get("citations")
 
-    # Tool audit visible on run events
+    # The Hermes run is visible on the standard run-event endpoint.
     events = client.get(f"/api/v1/runs/{body['run_id']}/events")
     assert events.status_code == 200
     payloads = events.json()
     assert payloads
-    toolish = [
-        item
-        for item in payloads
-        if item["type"] in {"tool_completed", "lifecycle"}
-        and (
-            (item.get("payload") or {}).get("tool")
-            or str((item.get("payload") or {}).get("lifecycle") or "").startswith("tool.")
-        )
-    ]
-    assert toolish
+    assert any(item["type"] in {"run_completed", "run_failed"} for item in payloads)
 
 
 def test_http_ask_project_not_found() -> None:
+    from tests.conftest import project_agent_headers
+
     client = TestClient(create_app())
     response = client.post(
         "/api/v1/project-agent/ask",
@@ -272,6 +275,7 @@ def test_http_ask_project_not_found() -> None:
             "project": {"tenant_id": "demo", "project_id": "missing-space"},
             "user_id": "u1",
         },
+        headers=project_agent_headers(),
     )
     assert response.status_code == 200
     body = response.json()
@@ -281,6 +285,8 @@ def test_http_ask_project_not_found() -> None:
 
 
 def test_http_ask_write_denied() -> None:
+    from tests.conftest import project_agent_headers
+
     client = TestClient(create_app())
     response = client.post(
         "/api/v1/project-agent/ask",
@@ -289,6 +295,7 @@ def test_http_ask_write_denied() -> None:
             "project": {"tenant_id": "demo", "project_id": "payment"},
             "user_id": "u1",
         },
+        headers=project_agent_headers(),
     )
     assert response.status_code == 200
     body = response.json()
@@ -297,14 +304,6 @@ def test_http_ask_write_denied() -> None:
     assert body["audit_ref"]["allow_apply"] is False
 
 
-def test_ask_service_rejects_non_read_agent_run_service() -> None:
-    registrations = default_local_project_registrations(ROOT)
-    engine, _ = build_registered_context_engine(registrations)
-    registry = registry_from_local_registrations(registrations)
-    run_service = RunService(
-        InMemoryRunRepository(),
-        ProjectWorkflow(ProjectResolver(to_project_registrations(registrations)), engine),
-        agent_mode="workflow",
-    )
-    with pytest.raises(ValueError, match="read_agent"):
-        ProjectAgentAskService(run_service=run_service, project_registry=registry)
+def test_ask_service_is_constructed_from_hermes_runtime() -> None:
+    ask, run_service = _build_ask_service()
+    assert ask.run_service is run_service

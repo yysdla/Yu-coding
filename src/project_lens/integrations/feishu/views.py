@@ -15,6 +15,7 @@ from project_lens.workflow.skills import (
     ProjectSkill,
     is_owner_lookup_question,
     is_project_intro_question,
+    skill_routing_enabled,
 )
 
 
@@ -88,6 +89,11 @@ def select_answer_view(run: AgentRun, answer: ProjectAnswer) -> AnswerView:
     """Choose user-facing view from question + answer. Skill stays internal."""
 
     question = run.question or ""
+    if not skill_routing_enabled():
+        if answer.skill == "project_investigation":
+            return select_investigation_answer_view(run, answer)
+        return AnswerView.GENERAL_REPLY
+
     if is_project_intro_question(question):
         return AnswerView.PROJECT_OVERVIEW
     if is_knowledge_gap_question(question):
@@ -147,7 +153,7 @@ def select_investigation_answer_view(
     if any(marker in question for marker in _REASON_MARKERS):
         return AnswerView.REASON_ANALYSIS
 
-    if is_project_intro_question(question):
+    if skill_routing_enabled() and is_project_intro_question(question):
         return AnswerView.PROJECT_OVERVIEW
 
     return AnswerView.GENERAL_REPLY

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -11,7 +9,6 @@ from project_lens.config import Settings
 from project_lens.main import create_app
 from project_lens.workflow.context_prompt import render_context_prompt
 from project_lens.workflow.model_adapter import ProviderModelAdapter
-from project_lens.workflow.orchestrator import ProjectWorkflow
 from project_lens.workflow.providers import (
     InternalProvider,
     LocalProvider,
@@ -112,20 +109,13 @@ async def test_reserved_providers_do_not_call_live_llm() -> None:
         assert result.allow_apply is False
 
 
-def test_workflow_depends_on_adapter_not_concrete_provider() -> None:
-    source = inspect.getsource(ProjectWorkflow)
-    assert "StubProvider" not in source
-    assert "OpenAIProvider" not in source
-    assert "InternalProvider" not in source
-    assert "LocalProvider" not in source
-    assert "create_default_model_adapter" in source or "model_adapter" in source
-    assert "render_context_prompt" in source
-
-
 def test_create_app_defaults_to_stub_provider() -> None:
     app = create_app()
     adapter = app.state.model_adapter
     assert isinstance(adapter.provider, StubProvider)
+    assert app.state.run_service.agent_mode == "hermes"
+    assert not hasattr(app.state.run_service, "_workflow")
+    assert not hasattr(app.state, "investigation_agent")
     client = TestClient(app)
     created = client.post(
         "/api/v1/runs",
@@ -140,14 +130,11 @@ def test_create_app_defaults_to_stub_provider() -> None:
             "question": "这个项目的架构是什么？",
         },
     )
+    assert created.status_code == 202
     run_id = created.json()["run_id"]
     executed = client.post(f"/api/v1/runs/{run_id}/execute")
-    assert executed.status_code == 200
-    result = app.state.run_service._workflow.last_model_adapter_result
-    assert result is not None
-    assert result.provider_kind == "stub"
-    assert result.usage["total_tokens"] > 0
-    assert result.allow_apply is False
+    assert executed.status_code == 409
+    assert "Hermes" in executed.json()["detail"]
 
 
 def test_factory_builds_reserved_kinds_without_live() -> None:

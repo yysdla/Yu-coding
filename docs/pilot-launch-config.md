@@ -22,6 +22,7 @@ Claim 必须引用 Evidence / GraphEvidence。
 ProjectMemory 必须审批。
 Apply / 自动 PR / deploy / rollback / restart 关闭。
 API key 与 Feishu secret 只放本机 `.env`，不进仓库、不进文档正文。
+pilot/production 的 Project Agent 与 Hermes API 必须配置 service token。
 ```
 
 默认应保持：
@@ -53,6 +54,9 @@ Copy-Item .env.example .env
 ```text
 GET /api/v1/integrations/feishu/status
 GET /docs
+GET /api/v1/health
+GET /api/v1/ready
+GET /api/v1/release-gate
 ```
 
 飞书回调：
@@ -91,13 +95,13 @@ POST /api/v1/feishu/events
 展开技术细节
 ```
 
-本地 Stub 完整 smoke（飞书回调路径，强制 stub / 非 live）：
+Hermes 飞书相关验收（替代已删除的 stub pilot smoke）：
 
 ```powershell
-& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe' -m pytest tests/test_stub_pilot_smoke.py -q
+& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe' -m pytest tests/test_feishu_integration.py tests/test_feishu_http_and_acl.py tests/test_hermes_runtime.py tests/test_feishu_answer_views.py -q
 ```
 
-该用例覆盖上述 8 类问题、多轮会话、卡片分区与 `allow_apply=False`。
+覆盖飞书集成、ACL、Hermes runtime 与 AnswerView；手测仍可用上方问法确认只读与 `allow_apply=False`。
 
 ### V0.2 本地 OpenAI Safe Live
 
@@ -132,15 +136,13 @@ PROJECT_LENS_MODEL_FALLBACK_TO_STUB=true
 - 无证据事实不会变成 FACT
 - `allow_apply` 始终为 false
 
-本地 Safe Live smoke（mock transport，不打真实网；CI 默认可跑）：
+自动化验收仍用 Hermes 飞书套件（不依赖已删除的 safe_live pilot smoke）：
 
 ```powershell
-& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe' -m pytest tests/test_safe_live_pilot_smoke.py -q
+& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe' -m pytest tests/test_feishu_integration.py tests/test_feishu_http_and_acl.py tests/test_hermes_runtime.py tests/test_feishu_answer_views.py -q
 ```
 
-覆盖：表达增强生效、无证据 FACT 降级、provider 失败 fallback、Audit 不泄露 API key、`allow_apply=False`。
-
-真实 key 手工验证（可选，不进 CI）：按上方环境变量启动 uvicorn 后问「介绍一下这个项目」，看 Audit 的 provider / usage。
+真实 key 手工验证（可选，不进 CI）：按上方环境变量启动 uvicorn 后问「介绍一下这个项目」，看 Audit 的 provider / usage、fallback 与 `allow_apply=False`。
 
 关闭 LLM（随时可回退）：
 
@@ -204,6 +206,12 @@ ProjectLens 当前是只读项目协作 Agent。
 | `PROJECT_LENS_LOCAL_PROJECT_REGISTRY` | 空 | 本地项目注册 |
 | `PROJECT_LENS_FEISHU_DOC_SYNC_ON_STARTUP` | `false` | 启动同步文档 |
 | `PROJECT_LENS_FEISHU_DOC_SYNC_INTERVAL_SECONDS` | `0` | 周期同步；0=关闭 |
+| `PROJECT_LENS_SERVICE_TOKEN` | 空 | pilot/production 内部 API Bearer token |
+| `PROJECT_LENS_FEISHU_HERMES_ADVANCED_TOOLS` | `false` | 提案/校验工具服务端开关 |
+| `PROJECT_LENS_FEISHU_HERMES_RISK_REVIEW_ENABLED` | `false` | Hermes 风险后台复查开关 |
+| `PROJECT_LENS_FEISHU_HERMES_RISK_REVIEW_INTERVAL_SECONDS` | `0` | 风险复查间隔；0=关闭 |
+| `PROJECT_LENS_FEISHU_HERMES_EXECUTION_ENABLED` | `false` | 隔离 worktree 执行开关 |
+| `PROJECTLENS_HERMES_ADVANCED_TOOLS` | `false` | Hermes 插件进程工具目录开关 |
 
 完整示例见仓库根目录 `.env.example`。
 
@@ -222,7 +230,7 @@ ProjectLens 当前是只读项目协作 Agent。
 - [ ] API key 未写入代码与文档
 - [ ] ruff + 全量 pytest 通过
 
-功能向（V0.1 应已具备；可用 `tests/test_stub_pilot_smoke.py` 一键验收）：
+功能向（Hermes-only 验收；自动化用上方飞书套件，手测勾选）：
 
 - [ ] 介绍一下这个项目
 - [ ] 项目地图
@@ -247,19 +255,13 @@ A: 不会。当前代码路径不打开 Apply；试点配置也不提供此类�
 
 ---
 
-## 2026-08-05 补充：read_agent 飞书灰度请优先看新 Runbook
+## 2026-09-07 补充：生产为 Hermes-only
 
-如果本次试点目标是验证“飞书自然语言项目问题进入只读调查 Agent”，请优先使用：
+`read_agent` / `ProjectInvestigationAgent` 灰度已退役。飞书试点请用：
 
 ```text
-docs/read-agent-feishu-grey-release.md
+docs/feishu-grey-release.md
+docs/hermes-only-migration-plan.md
 ```
 
-该文档覆盖：
-
-- `PROJECT_LENS_AGENT_MODE=read_agent` 怎么配置；
-- `/api/v1/integrations/feishu/status` 如何确认 agent_mode / model_live；
-- 飞书群内应该问哪些未预置自由项目问题；
-- `/project` 如何作为 debug/smoke 而不是正式入口；
-- 什么时候才打开真实 LLM；
-- 异常时如何回滚到 stub。
+旧入口 `docs/read-agent-feishu-grey-release.md` 仅保留退役说明，勿再按其 recipes 操作。

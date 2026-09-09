@@ -43,6 +43,15 @@ def _project() -> ProjectRef:
     return ProjectRef(tenant_id="demo", project_id="payment", service="order-service")
 
 
+def _allow_feishu_external(monkeypatch) -> None:  # noqa: ANN001
+    """RecordingTransport is injected; skip Phase 0 external-call hard-stop."""
+
+    monkeypatch.setattr(
+        "project_lens.integrations.feishu.http_adapter.assert_external_calls_allowed",
+        lambda *args, **kwargs: None,
+    )
+
+
 def test_to_feishu_document_record_maps_api_raw() -> None:
     raw = FeishuDocRaw(
         doc_token="docx_payment_owners",
@@ -64,7 +73,8 @@ def test_to_feishu_document_record_maps_api_raw() -> None:
     assert "Ada" in record.content
 
 
-def test_feishu_doc_client_fetches_meta_and_raw_content() -> None:
+def test_feishu_doc_client_fetches_meta_and_raw_content(monkeypatch) -> None:  # noqa: ANN001
+    _allow_feishu_external(monkeypatch)
     transport = RecordingTransport(
         {
             "/documents/docx_payment_owners/raw_content": {
@@ -101,7 +111,8 @@ def test_feishu_doc_client_fetches_meta_and_raw_content() -> None:
     assert any("raw_content" in call for call in transport.calls)
 
 
-def test_sync_indexes_new_revision_and_skips_unchanged() -> None:
+def test_sync_indexes_new_revision_and_skips_unchanged(monkeypatch) -> None:  # noqa: ANN001
+    _allow_feishu_external(monkeypatch)
     transport = RecordingTransport(
         {
             "/documents/docx_sync_1/raw_content": {
@@ -205,7 +216,8 @@ def test_sync_indexes_new_revision_and_skips_unchanged() -> None:
     assert recorded.doc_url == "https://feishu.cn/docx/docx_sync_1"
 
 
-def test_sync_continues_when_one_token_fails() -> None:
+def test_sync_continues_when_one_token_fails(monkeypatch) -> None:  # noqa: ANN001
+    _allow_feishu_external(monkeypatch)
     transport = RecordingTransport(
         {
             "/documents/docx_ok/raw_content": {
@@ -250,7 +262,8 @@ def test_sync_continues_when_one_token_fails() -> None:
     assert ok.access_scope == "project:payment:read"
 
 
-def test_failed_sync_preserves_url_scope_and_last_success_revision() -> None:
+def test_failed_sync_preserves_url_scope_and_last_success_revision(monkeypatch) -> None:  # noqa: ANN001
+    _allow_feishu_external(monkeypatch)
     transport = RecordingTransport(
         {
             "/documents/docx_keep/raw_content": {
@@ -348,7 +361,8 @@ def test_synced_doc_respects_acl_for_retrieval() -> None:
     assert allowed.evidence
 
 
-def test_sync_api_requires_credentials_and_permission() -> None:
+def test_sync_api_requires_credentials_and_permission(monkeypatch) -> None:  # noqa: ANN001
+    _allow_feishu_external(monkeypatch)
     app = create_app()
     # Force unavailable regardless of local .env credentials.
     app.state.feishu_doc_sync_service = FeishuDocumentSyncService(
@@ -445,6 +459,7 @@ def test_feishu_message_path_unaffected_when_doc_sync_unavailable() -> None:
             service="order-service",
             environment="production",
         ),
+        allow_demo_fallback=True,
     )
     app.state.feishu_messenger = RecordingFeishuMessenger()
     app.state.feishu_event_service._messenger = app.state.feishu_messenger
@@ -461,7 +476,7 @@ def test_feishu_message_path_unaffected_when_doc_sync_unavailable() -> None:
                 "tenant_key": "demo",
             },
             "event": {
-                "sender": {"sender_id": {"user_id": "feishu-user-1"}},
+                "sender": {"sender_id": {"open_id": "feishu-user-1", "user_id": "feishu-user-1"}},
                 "message": {
                     "message_id": "m-doc-sync",
                     "chat_id": "chat-1",

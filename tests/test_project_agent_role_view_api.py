@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from project_lens.agent.investigation import ProjectInvestigationAgent
+from project_lens.application.hermes_runtime import HermesRuntimeService
 from project_lens.application.project_agent_ask import (
     ProjectAgentAskRequest,
     ProjectAgentAskService,
@@ -21,9 +21,10 @@ from project_lens.application.run_service import InMemoryRunRepository, RunServi
 from project_lens.context.bootstrap import (
     build_registered_context_engine,
     default_local_project_registrations,
-    to_project_registrations,
 )
-from project_lens.domain.models import ProjectRef
+from project_lens.domain.identity import ActorContext
+from project_lens.domain.models import ProjectAnswer, ProjectRef
+from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopResult
 from project_lens.main import create_app
 from project_lens.project_space.registry import (
     load_project_spaces_from_dir,
@@ -31,12 +32,39 @@ from project_lens.project_space.registry import (
 )
 from project_lens.runtime.events import InMemoryEventSink
 from project_lens.runtime.lifecycle import LifecycleBus
-from project_lens.runtime.read_gateway import ReadContextGateway
-from project_lens.workflow.orchestrator import ProjectWorkflow
-from project_lens.workflow.resolver import ProjectResolver
-from tests.investigation_settings import stub_investigation_settings
+from tests.conftest import project_agent_headers
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _actor() -> ActorContext:
+    return ActorContext(
+        tenant_key="demo", actor_id="u1", chat_id="role-view-chat",
+        chat_type="group", source="test_fixture", authenticated=True,
+    )
+
+
+class _FakeHermesBridge:
+    async def answer(self, **kwargs):  # noqa: ANN003
+        project = kwargs["project"]
+        return FeishuHermesToolLoopResult(
+            ok=True,
+            envelope={"ok": True, "audit_ref": {"allow_apply": False}},
+            tool_names=("projectlens_search_context",),
+            loop_id=kwargs["loop_id"],
+            trace_id=kwargs["trace_id"],
+            verified_answer=ProjectAnswer(
+                project=project,
+                status="unknown",
+                business_summary="Evidence is insufficient.",
+                technical_summary="Evidence is insufficient.",
+                unknowns=("Need cited evidence.",),
+            ),
+        )
+
+
+def _install_fake_hermes(app) -> None:  # noqa: ANN001
+    app.state.feishu_hermes_tool_loop_bridge.answer = _FakeHermesBridge().answer
 
 
 def _build_services() -> tuple[ProjectAgentAskService, ProjectAgentRoleViewService, RunService]:
@@ -44,41 +72,32 @@ def _build_services() -> tuple[ProjectAgentAskService, ProjectAgentRoleViewServi
     engine, _index = build_registered_context_engine(registrations)
     registry = registry_from_local_registrations(registrations)
     for space in load_project_spaces_from_dir(ROOT / "config" / "projects", base_dir=ROOT):
-        if registry.get(space.tenant_id, space.project_id) is None:
-            registry.register(space)
+        registry.upsert(space)
 
     events = InMemoryEventSink()
     lifecycle = LifecycleBus(event_sink=events)
-    agent = ProjectInvestigationAgent(
-        context_engine=engine,
-        project_registry=registry,
-        read_gateway=ReadContextGateway(engine),
-        lifecycle=lifecycle,
-        app_settings=stub_investigation_settings(),
-    )
-    workflow = ProjectWorkflow(
-        ProjectResolver(to_project_registrations(registrations)),
-        engine,
-        lifecycle=lifecycle,
-    )
     run_service = RunService(
         InMemoryRunRepository(),
-        workflow,
         event_sink=events,
         lifecycle=lifecycle,
-        investigation_agent=agent,
-        agent_mode="read_agent",
+        agent_mode="hermes",
     )
-    ask = ProjectAgentAskService(run_service=run_service, project_registry=registry)
+    ask = ProjectAgentAskService(
+        hermes_runtime=HermesRuntimeService(
+            run_service=run_service, bridge=_FakeHermesBridge()  # type: ignore[arg-type]
+        ),
+        project_registry=registry,
+    )
     role_view = ProjectAgentRoleViewService(run_service=run_service)
     return ask, role_view, run_service
 
 
 def test_http_ask_then_role_view_replay_does_not_create_new_run() -> None:
     app = create_app()
-    app.state.investigation_agent._settings = stub_investigation_settings()
+    _install_fake_hermes(app)
     client = TestClient(app)
 
+    headers = project_agent_headers(actor_id="u1", chat_id="role-view-chat")
     ask = client.post(
         "/api/v1/project-agent/ask",
         json={
@@ -93,6 +112,7 @@ def test_http_ask_then_role_view_replay_does_not_create_new_run() -> None:
             "audience": "team",
             "mode": "read_only",
         },
+        headers=headers,
     )
     assert ask.status_code == 200
     ask_body = ask.json()
@@ -107,6 +127,7 @@ def test_http_ask_then_role_view_replay_does_not_create_new_run() -> None:
     replay = client.post(
         f"/api/v1/project-agent/runs/{run_id}/role-view",
         json={"audience": "technical"},
+        headers=headers,
     )
     assert replay.status_code == 200
     body = replay.json()
@@ -139,8 +160,9 @@ def test_http_role_view_missing_run() -> None:
 
 def test_http_role_view_invalid_audience() -> None:
     app = create_app()
-    app.state.investigation_agent._settings = stub_investigation_settings()
+    _install_fake_hermes(app)
     client = TestClient(app)
+    headers = project_agent_headers(actor_id="u1", chat_id="role-view-invalid")
     ask = client.post(
         "/api/v1/project-agent/ask",
         json={
@@ -148,11 +170,13 @@ def test_http_role_view_invalid_audience() -> None:
             "project": {"tenant_id": "demo", "project_id": "payment"},
             "user_id": "u1",
         },
+        headers=headers,
     )
     run_id = ask.json()["run_id"]
     response = client.post(
         f"/api/v1/project-agent/runs/{run_id}/role-view",
         json={"audience": "not-a-role"},
+        headers=headers,
     )
     assert response.status_code == 400
     body = response.json()
@@ -173,6 +197,7 @@ async def test_role_view_service_replays_without_execute(monkeypatch) -> None:
                 environment="production",
             ),
             user_id="u1",
+            actor=_actor(),
         )
     )
     assert result["ok"] is True

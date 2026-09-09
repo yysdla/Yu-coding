@@ -69,7 +69,79 @@ if (Test-Path $hermesEnv) {
 
 $env:PROJECTLENS_API_BASE_URL = "http://127.0.0.1:8000/api/v1"
 $env:PROJECTLENS_DEFAULT_TENANT_ID = "demo"
-$env:PROJECTLENS_DEFAULT_PROJECT_ID = "payment"
+$env:PROJECTLENS_DEFAULT_PROJECT_ID = "deepseek-harness"
+$projectLensHermesProvider = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_HERMES_PROVIDER"
+$projectLensHermesModel = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_HERMES_MODEL"
+$projectLensHermesBaseUrl = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_HERMES_BASE_URL"
+$projectLensHermesApiKey = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_HERMES_API_KEY"
+$projectLensModelBaseUrl = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_MODEL_OPENAI_BASE_URL"
+$projectLensModelApiKey = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_MODEL_OPENAI_API_KEY"
+$projectLensDeepseekApiKey = Import-DotEnvValue -Path $projectLensEnv -Key "DEEPSEEK_API_KEY"
+if ($projectLensHermesProvider) { $env:OPENAI_PROVIDER = $projectLensHermesProvider }
+if ($projectLensHermesModel) { $env:OPENAI_MODEL = $projectLensHermesModel }
+if ($projectLensHermesBaseUrl) { $env:OPENAI_BASE_URL = $projectLensHermesBaseUrl }
+if ($projectLensHermesApiKey) { $env:OPENAI_API_KEY = $projectLensHermesApiKey }
+if ($projectLensModelApiKey) { $env:OPENAI_API_KEY = $projectLensModelApiKey }
+if ($projectLensDeepseekApiKey) { $env:DEEPSEEK_API_KEY = $projectLensDeepseekApiKey }
+
+# Hermes resolves the primary model from config.yaml before environment
+# variables. Keep that model selection aligned with ProjectLens without
+# persisting the API key in the config file.
+$hermesConfigPath = Join-Path $env:HERMES_HOME "config.yaml"
+if ((Test-Path $hermesConfigPath) -and $projectLensHermesModel) {
+    Copy-Item -Path $hermesConfigPath -Destination "$hermesConfigPath.projectlens-backup" -Force
+    $hermesConfig = Get-Content $hermesConfigPath -Raw
+    $configProvider = if ($projectLensHermesProvider -eq "deepseek") { "deepseek" } else { "openai-api" }
+    $configBaseUrl = if ($projectLensHermesProvider -eq "deepseek") { "https://api.deepseek.com/v1" } else { $projectLensModelBaseUrl }
+    $hermesConfig = $hermesConfig -replace '(?m)^  provider:.*$', "  provider: $configProvider"
+    $hermesConfig = $hermesConfig -replace '(?m)^  default:.*$', "  default: $projectLensHermesModel"
+    $hermesConfig = $hermesConfig -replace '(?m)^  api_mode:.*$', '  api_mode: chat_completions'
+    if ($hermesConfig -match '(?m)^  base_url:') {
+        $hermesConfig = $hermesConfig -replace '(?m)^  base_url:.*$', "  base_url: $configBaseUrl"
+    } else {
+        $hermesConfig = $hermesConfig -replace '(?m)^(  api_mode:.*)$', "`$1`r`n  base_url: $configBaseUrl"
+    }
+    Set-Content -Path $hermesConfigPath -Value $hermesConfig -Encoding utf8
+}
+
+# Hermes reloads its home .env inside the agent worker. Synchronize the
+# OpenAI-compatible endpoint there too, otherwise stale DeepSeek variables
+# override the process environment after startup.
+if ((Test-Path $hermesEnv) -and $projectLensModelBaseUrl -and $projectLensModelApiKey) {
+    Copy-Item -Path $hermesEnv -Destination "$hermesEnv.projectlens-backup" -Force
+    $hermesEnvLines = [System.Collections.Generic.List[string]](Get-Content $hermesEnv)
+    $envOverrides = @{
+        "OPENAI_BASE_URL" = $projectLensModelBaseUrl
+        "OPENAI_API_KEY" = $projectLensModelApiKey
+        "OPENAI_MODEL" = $projectLensHermesModel
+    }
+    foreach ($key in $envOverrides.Keys) {
+        $found = $false
+        for ($index = 0; $index -lt $hermesEnvLines.Count; $index++) {
+            if ($hermesEnvLines[$index] -match "^$([regex]::Escape($key))=") {
+                $hermesEnvLines[$index] = "$key=$($envOverrides[$key])"
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { $hermesEnvLines.Add("$key=$($envOverrides[$key])") }
+    }
+    Set-Content -Path $hermesEnv -Value $hermesEnvLines -Encoding utf8
+}
+
+if ((Test-Path $hermesEnv) -and $projectLensDeepseekApiKey) {
+    $hermesEnvLines = [System.Collections.Generic.List[string]](Get-Content $hermesEnv)
+    $found = $false
+    for ($index = 0; $index -lt $hermesEnvLines.Count; $index++) {
+        if ($hermesEnvLines[$index] -match '^DEEPSEEK_API_KEY=') {
+            $hermesEnvLines[$index] = "DEEPSEEK_API_KEY=$projectLensDeepseekApiKey"
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) { $hermesEnvLines.Add("DEEPSEEK_API_KEY=$projectLensDeepseekApiKey") }
+    Set-Content -Path $hermesEnv -Value $hermesEnvLines -Encoding utf8
+}
 
 $env:FEISHU_APP_ID = $appId
 $env:FEISHU_APP_SECRET = $appSecret
@@ -81,6 +153,28 @@ if (-not $env:FEISHU_REQUIRE_MENTION) {
 }
 $env:FEISHU_ALLOW_ALL_USERS = "true"
 $env:GATEWAY_ALLOW_ALL_USERS = "true"
+
+# Keep the local ProjectLens API available before starting Hermes. The gateway
+# is a separate process and otherwise survives while its tool backend exits.
+$pythonExe = "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe"
+$apiUrl = "http://127.0.0.1:8000/api/v1/integrations/feishu/status"
+$apiListening = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+if (-not $apiListening) {
+    $apiOut = Join-Path $projectLensRoot "project-lens-api.out.log"
+    $apiErr = Join-Path $projectLensRoot "project-lens-api.err.log"
+    Start-Process -FilePath $pythonExe -WorkingDirectory $projectLensRoot -WindowStyle Hidden `
+        -ArgumentList @("-m", "uvicorn", "project_lens.main:app", "--host", "127.0.0.1", "--port", "8000") `
+        -RedirectStandardOutput $apiOut -RedirectStandardError $apiErr | Out-Null
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $status = Invoke-WebRequest -Uri $apiUrl -UseBasicParsing -TimeoutSec 2
+            if ($status.StatusCode -eq 200) { break }
+        } catch {
+            if ($attempt -eq 19) { throw "ProjectLens API did not become ready at $apiUrl" }
+        }
+    }
+}
 
 if ($verificationToken) {
     $env:FEISHU_VERIFICATION_TOKEN = $verificationToken

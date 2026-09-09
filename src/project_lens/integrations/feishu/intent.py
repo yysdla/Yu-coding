@@ -15,7 +15,11 @@ from project_lens.integrations.feishu.commands import (
     classify_feishu_command,
 )
 from project_lens.workflow.followup import FollowupRewriter
-from project_lens.workflow.skills import ProjectSkill, classify_project_question
+from project_lens.workflow.skills import (
+    ProjectSkill,
+    classify_project_question,
+    skill_routing_enabled,
+)
 
 _rewriter = FollowupRewriter()
 
@@ -159,7 +163,7 @@ def is_project_related_message(
     if is_bot_meta_question(stripped):
         return False
 
-    if _rewriter.rewrite(stripped, session) is not None:
+    if skill_routing_enabled() and _rewriter.rewrite(stripped, session) is not None:
         return True
     if classify_feishu_command(stripped) != FeishuProjectCommand.FREE_QUESTION:
         return True
@@ -174,7 +178,8 @@ def is_project_related_message(
     # Mid-conversation ambiguous text stays on the project path,
     # but never overrides chitchat / bot meta (already handled above).
     if (
-        session is not None
+        skill_routing_enabled()
+        and session is not None
         and session.recent_turns
         and session.summary.active_skill
         and not _is_explicit_chitchat(stripped)
@@ -193,6 +198,8 @@ def _has_project_signal(text: str) -> bool:
         return True
     if _CODE_IDENT.search(text):
         return True
+    if not skill_routing_enabled():
+        return False
     skill = classify_project_question(text)
     return skill != ProjectSkill.PROJECT_KNOWLEDGE
 

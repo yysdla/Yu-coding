@@ -1,0 +1,222 @@
+{
+  "tenant_id": "demo",
+  "project_id": "deepseek-harness",
+  "display_name": "DeepSeek Harness",
+  "repositories": [
+    {
+      "name": "deepseek-harness",
+      "path": "C:/Users/Administrator/Desktop/deepseek-harness",
+      "default_branch": "main"
+    }
+  ],
+  "services": ["dsh"],
+  "environments": ["local"],
+  "documents_root": "C:/Users/Administrator/Desktop/deepseek-harness/docs",
+  "access_scope": "project:deepseek-harness:read",
+  "file_allowlist": [
+    "packages/",
+    "apps/",
+    "docs/",
+    "python/",
+    "examples/",
+    "scripts/",
+    "native/",
+    "README.md",
+    "README.zh.md",
+    "AGENTS.md",
+    "BENCHMARK.md",
+    "package.json"
+  ],
+  "public_sources": ["docs/", "README.md", "README.zh.md", "AGENTS.md"],
+  "rag_namespace": "demo:deepseek-harness:rag",
+  "graph_namespace": "demo:deepseek-harness",
+  "memory_namespace": "demo:deepseek-harness",
+  "source_connectors": [
+    {
+      "kind": "repo",
+      "name": "deepseek-harness",
+      "path": "C:/Users/Administrator/Desktop/deepseek-harness"
+    },
+    {
+      "kind": "documents",
+      "name": "deepseek-harness-docs",
+      "path": "C:/Users/Administrator/Desktop/deepseek-harness/docs",
+      "namespace": "demo:deepseek-harness:rag"
+    },
+    {
+      "kind": "feishu_docs",
+      "name": "pilot-feishu-doc",
+      "metadata": {
+        "token": "YOUR_FEISHU_DOC_TOKEN",
+        "title": "ProjectLens 试点 · DeepSeek Harness 项目说明（同步测试）"
+      }
+    }
+  ],
+  "feishu_chat_bindings": [
+    {
+      "tenant_key": "feishu-demo",
+      "chat_id": "oc_deepseek_harness",
+      "visibility": "team_shared"
+    }
+  ],
+  "default_skill_guides": ["project_intro"],
+  "members": [
+    {"actor_id": "u1", "roles": ["developer"]},
+    {"actor_id": "hermes-user", "roles": ["developer"]},
+    {"actor_id": "ou_demo_developer", "roles": ["developer"]}
+  ],
+  "role_policies": [
+    {
+      "actor_id": "u1",
+      "role": "developer",
+      "readable_sources": [
+        "packages/",
+        "apps/",
+        "docs/",
+        "python/",
+        "examples/",
+        "scripts/",
+        "native/",
+        "README.md",
+        "README.zh.md",
+        "AGENTS.md",
+        "BENCHMARK.md",
+        "package.json"
+      ],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "list_project_files",
+        "grep_project_code",
+        "search_project_code",
+        "read_project_file_range",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ],
+      "forbidden_sources": [
+        "node_modules/",
+        ".pnpm-store/",
+        "secrets/",
+        ".env",
+        "*.db",
+        ".git/"
+      ],
+      "answer_depth": "detailed",
+      "answer_style": "technical",
+      "visibility_level": "team_shared"
+    },
+    {
+      "actor_id": "hermes-user",
+      "role": "developer",
+      "readable_sources": [
+        "packages/",
+        "apps/",
+        "docs/",
+        "python/",
+        "examples/",
+        "scripts/",
+        "native/",
+        "README.md",
+        "README.zh.md",
+        "AGENTS.md",
+        "BENCHMARK.md",
+        "package.json"
+      ],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "list_project_files",
+        "grep_project_code",
+        "search_project_code",
+        "read_project_file_range",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ],
+      "forbidden_sources": [
+        "node_modules/",
+        ".pnpm-store/",
+        "secrets/",
+        ".env",
+        "*.db",
+        ".git/"
+      ],
+      "answer_depth": "detailed",
+      "answer_style": "technical",
+      "visibility_level": "team_shared"
+    },
+    {
+      "actor_id": "ou_demo_developer",
+      "role": "developer",
+      "readable_sources": [
+        "packages/",
+        "apps/",
+        "docs/",
+        "python/",
+        "examples/",
+        "scripts/",
+        "native/",
+        "README.md",
+        "README.zh.md",
+        "AGENTS.md",
+        "BENCHMARK.md",
+        "package.json"
+      ],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "list_project_files",
+        "grep_project_code",
+        "search_project_code",
+        "read_project_file_range",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ],
+      "forbidden_sources": [
+        "node_modules/",
+        ".pnpm-store/",
+        "secrets/",
+        ".env",
+        "*.db",
+        ".git/"
+      ],
+      "answer_depth": "detailed",
+      "answer_style": "technical",
+      "visibility_level": "team_shared"
+    }
+  ],
+  "chat_visibility_policies": [
+    {
+      "chat_id": "oc_deepseek_harness",
+      "visibility_level": "team_shared",
+      "allowed_roles": ["developer", "qa", "guest", "manager"],
+      "readable_sources": [
+        "packages/",
+        "apps/",
+        "docs/",
+        "python/",
+        "examples/",
+        "scripts/",
+        "native/",
+        "README.md",
+        "README.zh.md",
+        "AGENTS.md",
+        "BENCHMARK.md",
+        "package.json"
+      ],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "list_project_files",
+        "grep_project_code",
+        "search_project_code",
+        "read_project_file_range",
+        "query_graph",
+        "authorized_evidence",
+        "list_knowledge_gaps"
+      ]
+    }
+  ]
+}

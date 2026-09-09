@@ -2,10 +2,21 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from project_lens.domain.models import ProjectRef
+from project_lens.domain.models import (
+    Claim,
+    ClaimType,
+    Evidence,
+    EvidenceGrade,
+    EvidenceType,
+    ProjectAnswer,
+    ProjectRef,
+    SourceRef,
+)
 from project_lens.integrations.feishu.adapter import RecordingFeishuMessenger
+from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopResult
 from project_lens.integrations.feishu.identity import parse_project_bindings
 from project_lens.main import create_app
+from datetime import datetime, timezone
 
 
 LOCAL_TOKEN = "project-lens-local-token"
@@ -14,6 +25,53 @@ TRACEBACK = """Traceback (most recent call last):
     coupon_id = request.coupon.id
 AttributeError: 'NoneType' object has no attribute 'id'
 """
+
+
+class _FakeHermesBridge:
+    async def answer(self, **kwargs):  # noqa: ANN003
+        project = kwargs["project"]
+        evidence = Evidence(
+            type=EvidenceType.CODE,
+            project=project,
+            source=SourceRef(system="local", source_id="src/order_service.py"),
+            content="coupon_id = request.coupon.id",
+            observed_at=datetime.now(timezone.utc),
+            access_scope="project:payment:read",
+            content_hash="1234567890abcdefaa",
+        )
+        answer = ProjectAnswer(
+            project=project,
+            skill="incident_diagnosis",
+            confidence=0.8,
+            status="identified",
+            business_summary="下单可能因 coupon 为空失败",
+            technical_summary="AttributeError on request.coupon.id",
+            claims=(
+                Claim(
+                    text="order-service create_order fails when coupon is None",
+                    type=ClaimType.FACT,
+                    evidence_ids=(evidence.id,),
+                    grade=EvidenceGrade.B,
+                ),
+            ),
+            evidence=(evidence,),
+            unknowns=(),
+        )
+        return FeishuHermesToolLoopResult(
+            ok=True,
+            envelope={
+                "ok": True,
+                "audit_ref": {
+                    "allow_apply": False,
+                    "loop_id": str(kwargs["loop_id"]),
+                    "trace_id": str(kwargs["trace_id"]),
+                },
+            },
+            tool_names=("projectlens_search_context",),
+            loop_id=kwargs["loop_id"],
+            trace_id=kwargs["trace_id"],
+            verified_answer=answer,
+        )
 
 
 def _configure(app) -> None:
@@ -29,10 +87,14 @@ def _configure(app) -> None:
     app.state.feishu_event_service._identity_mapper = parse_project_bindings(
         "",
         default_project=default_project,
+        allow_demo_fallback=True,
     )
     app.state.feishu_messenger = RecordingFeishuMessenger()
     app.state.feishu_event_service._messenger = app.state.feishu_messenger
     app.state.feishu_event_service._memory_store = app.state.memory_store
+    app.state.feishu_hermes_tool_loop_bridge.answer = _FakeHermesBridge().answer
+    if getattr(app.state, "hermes_runtime_service", None) is not None:
+        app.state.hermes_runtime_service._bridge = app.state.feishu_hermes_tool_loop_bridge
 
 
 def _message_payload(*, event_id: str, text: str) -> dict:
@@ -44,10 +106,11 @@ def _message_payload(*, event_id: str, text: str) -> dict:
             "tenant_key": "demo",
         },
         "event": {
-            "sender": {"sender_id": {"user_id": "feishu-user-1"}},
+            "sender": {"sender_id": {"open_id": "feishu-user-1", "user_id": "feishu-user-1"}},
             "message": {
                 "message_id": f"msg-{event_id}",
                 "chat_id": "chat-1",
+                "chat_type": "group",
                 "message_type": "text",
                 "content": f'{{"text":"{text}"}}',
             },
@@ -71,7 +134,7 @@ def _card_action_payload(
             "tenant_key": "demo",
         },
         "event": {
-            "operator": {"user_id": user_id},
+            "operator": {"open_id": user_id, "user_id": user_id},
             "action": {
                 "tag": "button",
                 "value": {

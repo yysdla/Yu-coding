@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from project_lens.config import assert_external_calls_allowed
 from project_lens.integrations.feishu.adapter import FeishuMessenger
 
 
@@ -72,6 +73,7 @@ class FeishuTenantTokenProvider:
         self._lock = Lock()
 
     def get(self) -> str:
+        assert_external_calls_allowed("feishu")
         now = time.time()
         with self._lock:
             if self._cache.value and now < self._cache.expires_at:
@@ -119,22 +121,34 @@ class HttpFeishuMessenger(FeishuMessenger):
         )
 
     async def post_card(self, chat_id: str, card: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._post_sync, chat_id, card)
+        await asyncio.to_thread(self._post_sync, chat_id, card, "chat_id")
 
-    def _post_sync(self, chat_id: str, content: dict[str, Any]) -> None:
+    async def post_user_card(self, open_id: str, card: dict[str, Any]) -> None:
+        await asyncio.to_thread(self._post_sync, open_id, card, "open_id")
+
+    def _post_sync(
+        self,
+        receive_id: str,
+        content: dict[str, Any],
+        receive_id_type: str,
+    ) -> None:
+        assert_external_calls_allowed("feishu")
         last_payload: object = None
         for attempt in range(self._max_retries + 1):
             token = self._token_provider.get()
             status_code, payload = self._transport.request(
                 method="POST",
-                url=f"{self._base_url}/open-apis/im/v1/messages?receive_id_type=chat_id",
+                url=(
+                    f"{self._base_url}/open-apis/im/v1/messages"
+                    f"?receive_id_type={receive_id_type}"
+                ),
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json; charset=utf-8",
                 },
                 body=json.dumps(
                     {
-                        "receive_id": chat_id,
+                        "receive_id": receive_id,
                         "msg_type": "interactive",
                         "content": json.dumps(content, ensure_ascii=False),
                     },

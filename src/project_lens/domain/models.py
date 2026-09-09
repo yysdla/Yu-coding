@@ -77,6 +77,17 @@ class Evidence(FrozenModel):
     access_scope: str = Field(min_length=1, max_length=200)
     content_hash: str = Field(min_length=16, max_length=128)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    revoked: bool = False
+    revoked_at: datetime | None = None
+
+
+class EvidenceRef(FrozenModel):
+    """Citation-safe evidence reference; never carries the source body."""
+
+    id: UUID
+    kind: EvidenceType
+    source_uri: str = Field(min_length=1, max_length=600)
+    summary: str = Field(default="", max_length=300)
 
 
 class Claim(FrozenModel):
@@ -205,8 +216,15 @@ class ProjectAnswer(FrozenModel):
     status: str
     business_summary: str
     technical_summary: str
+    conclusion: str = ""
     claims: tuple[Claim, ...] = ()
+    facts: tuple[Claim, ...] = ()
+    inferences: tuple[Claim, ...] = ()
     evidence: tuple[Evidence, ...] = ()
+    impact: tuple[str, ...] = ()
+    next_actions: tuple[str, ...] = ()
+    citations: tuple[EvidenceRef, ...] = ()
+    policy_used: str = "unknown"
     unknowns: tuple[str, ...] = ()
     recommended_actions: tuple[ActionProposal, ...] = ()
 
@@ -221,6 +239,16 @@ class ProjectAnswer(FrozenModel):
         }
         if missing:
             raise ValueError(f"claims reference missing evidence: {sorted(map(str, missing))}")
+        if any(item.type != ClaimType.FACT for item in self.facts):
+            raise ValueError("ProjectAnswer.facts may contain only fact claims")
+        if any(item.type != ClaimType.INFERENCE for item in self.inferences):
+            raise ValueError("ProjectAnswer.inferences may contain only inference claims")
+        claim_ids = {item.id for item in self.claims}
+        if any(item.id not in claim_ids for item in (*self.facts, *self.inferences)):
+            raise ValueError("facts and inferences must reference claims from the fact core")
+        citation_ids = {item.id for item in self.citations}
+        if not citation_ids.issubset(known):
+            raise ValueError("citations must reference evidence carried by the answer")
         return self
 
 
@@ -233,6 +261,14 @@ class AgentRun(BaseModel):
     user_id: str = Field(min_length=1, max_length=100)
     channel_id: str | None = Field(default=None, max_length=200)
     question: str = Field(min_length=1, max_length=20_000)
+    runtime_access: dict[str, object] | None = None
+    # Runtime fields are audit metadata.  The serialized access snapshot remains
+    # the authorization source for replay and must be re-bound before use.
+    runtime: str = Field(default="legacy", min_length=1, max_length=50)
+    entry_mode: str | None = Field(default=None, max_length=80)
+    hermes_loop_id: UUID | None = None
+    context_snapshot_id: UUID | None = None
+    context_hash: str | None = Field(default=None, max_length=128)
     status: RunStatus = RunStatus.ACCEPTED
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

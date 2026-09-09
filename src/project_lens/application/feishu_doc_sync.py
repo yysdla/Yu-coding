@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 
 from project_lens.application.feishu_doc_sync_status import FeishuDocSyncStatusStore
 from project_lens.context.indexing.feishu_documents import FeishuDocumentIndexer
-from project_lens.context.sources.feishu_docs import to_feishu_document_record
+from project_lens.context.sources.feishu_docs import to_feishu_document_record, to_source_record
+from project_lens.context.source_store import SourceRecordStore
 from project_lens.context.store import InMemoryEvidenceIndex
 from project_lens.domain.feishu_doc_sync import FeishuDocSyncStatus, FeishuDocSyncStatusValue
 from project_lens.domain.models import ProjectRef
@@ -38,11 +39,13 @@ class FeishuDocumentSyncService:
         index: InMemoryEvidenceIndex,
         status_store: FeishuDocSyncStatusStore | None = None,
         indexer: FeishuDocumentIndexer | None = None,
+        source_store: SourceRecordStore | None = None,
     ) -> None:
         self._client = client
         self._index = index
         self._status_store = status_store
         self._indexer = indexer or FeishuDocumentIndexer()
+        self._source_store = source_store
 
     @property
     def available(self) -> bool:
@@ -133,10 +136,14 @@ class FeishuDocumentSyncService:
                 statuses.append(_persist_status(self._status_store, status))
                 continue
 
-            self._index.remove_source_prefix(
-                system="feishu_doc",
-                source_id_prefix=f"{token}#",
-            )
+            if self._source_store is None:
+                # Preserve the legacy in-memory service contract for isolated callers.
+                self._index.remove_source_prefix(
+                    system="feishu_doc",
+                    source_id_prefix=f"{token}#",
+                )
+            else:
+                self._source_store.put(to_source_record(record))
             indexed += self._index.add_many(evidence)
             status = _build_status(
                 project=project,

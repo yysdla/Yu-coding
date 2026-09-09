@@ -13,7 +13,7 @@ class FeishuCallbackHeader(BaseModel):
 
     event_id: str = Field(min_length=1)
     event_type: str = Field(min_length=1)
-    tenant_key: str = Field(default="demo")
+    tenant_key: str = Field(min_length=1)
 
 
 class FeishuSenderId(BaseModel):

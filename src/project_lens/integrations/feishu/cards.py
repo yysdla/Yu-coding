@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from project_lens.application.audience_views import render_audience_view
 from project_lens.config import settings
 from project_lens.domain.feishu_doc_sync import FeishuDocSyncStatus, FeishuDocSyncStatusValue
 from project_lens.domain.memory import MemoryProposal, ProjectMemory, memory_type_label
+from project_lens.domain.risk import RiskFinding, RiskSeverity
 from project_lens.domain.models import (
     ActionProposal,
     AgentRun,
@@ -25,6 +27,7 @@ from project_lens.integrations.feishu.audit_summary import (
     build_feishu_audit_summary,
 )
 from project_lens.integrations.feishu.role_views import render_role_view_elements
+from project_lens.integrations.feishu.role_views import render_audience_view_elements
 from project_lens.integrations.feishu.views import (
     AnswerView,
     answer_view_title,
@@ -34,12 +37,78 @@ from project_lens.integrations.feishu.views import (
     select_answer_view,
 )
 from project_lens.workflow.engineering_bridge import engineering_action_from_answer
-from project_lens.workflow.skills import ProjectSkill, is_project_intro_question
+from project_lens.workflow.skills import (
+    ProjectSkill,
+    is_project_intro_question,
+    skill_routing_enabled,
+)
+from project_lens.project_space.policies import effective_scope_from_audit_dict
 
 
 def render_progress_text(stage: str, run: AgentRun) -> str:
     del run  # keep signature for call sites; do not surface run_id on chat progress
     return f"ProjectLens 已收到问题，正在{stage}…"
+
+
+def render_risk_card(
+    finding: RiskFinding,
+    *,
+    group_safe: bool = False,
+) -> dict[str, object]:
+    """Render citation-only risk details; never include Evidence bodies."""
+
+    severity_label = {
+        RiskSeverity.HIGH: "高",
+        RiskSeverity.MEDIUM: "中",
+        RiskSeverity.LOW: "低",
+    }[finding.severity]
+    refs = finding.affected_refs[:4] or (finding.primary_ref,)
+    evidence = finding.evidence_ids[:4]
+    elements: list[dict[str, object]] = [
+        _markdown(
+            f"**风险等级**\n{severity_label}\n"
+            f"**当前状态**\n{finding.state.value}\n"
+            f"**影响对象**\n" + "、".join(refs)
+        ),
+        _markdown(f"**判断说明**\n{finding.summary}"),
+        _markdown(
+            "**关键证据引用**\n"
+            + "\n".join(f"- Evidence `{item}`" for item in evidence)
+        ),
+        _markdown(
+            f"**检测时间**\n{finding.detected_at.isoformat()}\n"
+            f"**数据新鲜度**\n最近确认：{finding.last_seen_at.isoformat()}"
+        ),
+    ]
+    if group_safe:
+        elements.append(
+            _markdown("详细证据仅在具备权限的私聊中查看；群内不展示来源正文。")
+        )
+    else:
+        elements.extend(_risk_action_rows(finding.risk_id))
+    return FeishuCard(
+        title=f"ProjectLens 风险提醒 · {finding.title}",
+        elements=elements,
+    ).to_payload()
+
+
+def render_risk_feedback_result_card(
+    finding: RiskFinding,
+    *,
+    action: str,
+    duplicate: bool,
+) -> dict[str, object]:
+    status_text = "该操作已处理，本次未重复创建反馈。" if duplicate else "反馈已记录。"
+    return FeishuCard(
+        title="ProjectLens 风险反馈",
+        elements=[
+            _markdown(
+                f"**风险**\n{finding.title}\n"
+                f"**操作**\n{action}\n"
+                f"**当前状态**\n{finding.state.value}\n{status_text}"
+            )
+        ],
+    ).to_payload()
 
 
 def render_answer_card(
@@ -59,6 +128,22 @@ def render_answer_card(
 
     view = select_answer_view(run, answer)
     selected_audience = select_answer_audience(run.question, explicit=audience)
+    audience_view = None
+    if run.runtime_access is not None and run.channel_id:
+        scope = effective_scope_from_audit_dict(
+            run.runtime_access,
+            project=run.project,
+            actor_id=run.user_id,
+            chat_id=run.channel_id,
+        )
+        audience_view = render_audience_view(
+            answer,
+            role=scope.role,
+            chat_type=scope.chat_type,
+            scope=scope,
+            audience=audience.value if audience is not None else None,
+        )
+        selected_audience = AnswerAudience(audience_view.audience)
     summary = audit_summary or build_feishu_audit_summary(run, answer)
     debug_on = (
         settings.feishu_show_debug_audit if show_debug_audit is None else show_debug_audit
@@ -66,7 +151,9 @@ def render_answer_card(
 
     # Evidence/debug RoleViews always render from the same answer; otherwise
     # insufficient-evidence stays the actionable TEAM-first fallback.
-    if selected_audience in {AnswerAudience.EVIDENCE, AnswerAudience.DEBUG}:
+    if audience_view is not None:
+        elements = render_audience_view_elements(run, audience_view)
+    elif selected_audience in {AnswerAudience.EVIDENCE, AnswerAudience.DEBUG}:
         elements = render_role_view_elements(
             run, answer, view=view, audience=selected_audience
         )
@@ -78,7 +165,11 @@ def render_answer_card(
         )
 
     engineering_action = engineering_action_from_answer(answer)
-    if engineering_action is not None and selected_audience != AnswerAudience.DEBUG:
+    if engineering_action is not None and selected_audience in {
+        AnswerAudience.TECHNICAL,
+        AnswerAudience.OPS,
+        AnswerAudience.EVIDENCE,
+    }:
         evidence_refs = tuple(
             human_evidence_label(item) for item in answer.evidence[:5]
         )
@@ -95,7 +186,11 @@ def render_answer_card(
         elements.append(_memory_action_buttons(memory_proposal.id))
 
     if selected_audience not in {AnswerAudience.EVIDENCE, AnswerAudience.DEBUG}:
-        follow_ups = _follow_up_questions(answer.skill, question=run.question)
+        follow_ups = (
+            _follow_up_questions(answer.skill, question=run.question)
+            if skill_routing_enabled()
+            else ()
+        )
         if follow_ups:
             elements.append(
                 _markdown(
@@ -104,6 +199,7 @@ def render_answer_card(
                     + "\n- 给技术看的版本 / 给产品/业务看的版本 / 给测试看的版本 / 查看证据 / 知识库缺什么"
                 )
             )
+        elements.append(_run_detail_actions(run.id))
         elements.append(_role_view_action_buttons(selected_audience))
 
     # SkillGuide / provider / tool trail / trace stay in the bottom debug zone only.
@@ -111,7 +207,7 @@ def render_answer_card(
         elements.append(_markdown(summary.to_debug_markdown()))
 
     title = answer_view_title(view)
-    if selected_audience != AnswerAudience.TEAM:
+    if audience is not None and selected_audience != AnswerAudience.TEAM:
         title = f"{title} · {audience_label(selected_audience)}"
 
     return FeishuCard(
@@ -583,12 +679,67 @@ def render_memory_decision_card(
 
 
 def render_failure_card(run: AgentRun) -> dict[str, object]:
+    error = (run.error or "").strip()
+    model_failure = "模型调用失败" in error or any(
+        marker in error.casefold()
+        for marker in ("502", "429", "503", "504", "api", "gateway", "rate limit")
+    )
+    heading = "模型调用失败" if model_failure else "ProjectLens 处理失败"
+    detail = (
+        f"模型服务暂时不可用，未能完成这次回答。\n原因：{error[:400]}"
+        if model_failure and error
+        else "这次我没能完成项目资料核对。"
+    )
     return FeishuCard(
-        title="ProjectLens 处理失败",
+        title=heading,
         elements=[
-            _markdown("**失败原因**\n" + (run.error or "unknown error")),
-            _note(f"trace_id: {run.trace_id}"),
+            _markdown(
+                f"**{detail}**\n"
+                "你可以稍后重试，或者把问题缩小到某个服务、文件或接口。"
+            ),
+            _run_detail_actions(run.id),
         ],
+    ).to_payload()
+
+
+def render_run_detail_card(detail: dict[str, object]) -> dict[str, object]:
+    if not detail.get("ok"):
+        body = (
+            "**这次我没能打开运行详情**\n"
+            f"- 原因：{detail.get('message') or detail.get('answer_summary') or 'unknown'}"
+        )
+    else:
+        source_summary = [
+            str(item) for item in (detail.get("source_summary") or [])  # type: ignore[arg-type]
+        ]
+        facts = detail.get("facts") or []
+        unknowns = [
+            str(item) for item in (detail.get("unknowns") or [])  # type: ignore[arg-type]
+        ]
+        lines = [
+            "**运行详情**",
+            f"- run_id: {detail.get('run_id')}",
+            f"- trace_id: {detail.get('trace_id')}",
+            f"- runtime: {detail.get('runtime')}",
+            f"- entry_mode: {detail.get('entry_mode')}",
+            f"- 验证状态: {detail.get('verification_state')}",
+            f"- 已确认事实: {len(facts) if isinstance(facts, list) else 0}",
+            f"- 引用数量: {detail.get('citation_count')}",
+            "- allow_apply=false",
+        ]
+        if source_summary:
+            lines.append("- 来源摘要：")
+            lines.extend(f"  - {item}" for item in source_summary[:6])
+        if unknowns:
+            lines.append("- 未知项：")
+            lines.extend(f"  - {item}" for item in unknowns[:4])
+        failure_reason = str(detail.get("failure_reason") or "").strip()
+        if failure_reason:
+            lines.append(f"- 失败原因：{failure_reason[:300]}")
+        body = "\n".join(lines)
+    return FeishuCard(
+        title="ProjectLens 运行详情",
+        elements=[_markdown(body)],
     ).to_payload()
 
 
@@ -694,6 +845,48 @@ def _ask_question_button(label: str, question: str, *, primary: bool = False) ->
     }
 
 
+def _risk_action_rows(risk_id: str) -> list[dict[str, object]]:
+    return [
+        {
+            "tag": "action",
+            "actions": [
+                _risk_button("确认风险", "acknowledge", risk_id, primary=True),
+                _risk_button("误报", "dismiss", risk_id),
+                _risk_button("明天提醒", "snooze", risk_id),
+            ],
+        },
+        {
+            "tag": "action",
+            "actions": [
+                _risk_button("更新进展", "update_progress", risk_id),
+                _risk_button("请求协助", "request_help", risk_id),
+                _ask_question_button(
+                    "为什么判断为风险？",
+                    f"为什么风险 {risk_id} 被判断为风险？请只引用我有权限查看的证据。",
+                ),
+            ],
+        },
+    ]
+
+
+def _risk_button(
+    label: str,
+    action: str,
+    risk_id: str,
+    *,
+    primary: bool = False,
+) -> dict[str, object]:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": "primary" if primary else "default",
+        "value": {
+            "action": f"risk_{action}",
+            "risk_id": risk_id,
+        },
+    }
+
+
 def _role_view_action_buttons(audience: AnswerAudience) -> dict[str, object]:
     """RoleView switches — Feishu ask_question short-circuits to re-render same answer."""
 
@@ -714,6 +907,23 @@ def _role_view_action_buttons(audience: AnswerAudience) -> dict[str, object]:
         actions.append(_ask_question_button("回到团队视图", "回到团队视图"))
     # Cap Feishu action row length.
     return {"tag": "action", "actions": actions[:4]}
+
+
+def _run_detail_actions(run_id: UUID) -> dict[str, object]:
+    return {
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看运行详情"},
+                "type": "default",
+                "value": {
+                    "action": "projectlens_run_detail",
+                    "run_id": str(run_id),
+                },
+            }
+        ],
+    }
 
 
 def _collaboration_shortcut_buttons() -> dict[str, object]:

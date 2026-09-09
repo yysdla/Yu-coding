@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from project_lens.domain.models import ProjectRef
+from project_lens.project_space.member_directory import ProjectMember
 from project_lens.project_space.policies import (
     ChatVisibilityPolicy,
     ProjectMemberRolePolicy,
@@ -20,6 +22,30 @@ class RepositoryRef:
 
 
 @dataclass(frozen=True)
+class SourceConnectorRef:
+    """ProjectSpace-owned source connector metadata.
+
+    This is a manifest-level reference only. Runtime access still goes through
+    ProjectLens gateways and indexes, never directly through the Agent runtime.
+    """
+
+    kind: str
+    name: str
+    path: Path | None = None
+    namespace: str = ""
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class FeishuChatBindingRef:
+    """Manifest-level Feishu chat binding for a ProjectSpace."""
+
+    tenant_key: str
+    chat_id: str
+    visibility: str = "team_shared"
+
+
+@dataclass(frozen=True)
 class ProjectSpace:
     """Project-scoped plugin content for the Agent Shell."""
 
@@ -29,14 +55,19 @@ class ProjectSpace:
     repositories: tuple[RepositoryRef, ...]
     services: tuple[str, ...] = ()
     environments: tuple[str, ...] = ()
+    rag_namespace: str = ""
     graph_namespace: str = ""
     memory_namespace: str = ""
     access_scope: str = ""
     file_allowlist: tuple[str, ...] = ("src/", "tests/", "knowledge/")
+    public_sources: tuple[str, ...] = ()
     default_skill_guides: tuple[str, ...] = ()
+    members: tuple[ProjectMember, ...] = ()
     role_policies: tuple[ProjectMemberRolePolicy, ...] = ()
     chat_visibility_policies: tuple[ChatVisibilityPolicy, ...] = ()
     documents_root: Path | None = None
+    source_connectors: tuple[SourceConnectorRef, ...] = ()
+    feishu_chat_bindings: tuple[FeishuChatBindingRef, ...] = ()
 
     @property
     def project(self) -> ProjectRef:

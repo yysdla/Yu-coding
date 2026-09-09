@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from project_lens.application.audience_views import render_audience_view
 from project_lens.domain.models import (
     AgentRun,
     ClaimType,
@@ -14,6 +15,7 @@ from project_lens.domain.models import (
     ProjectRef,
 )
 from project_lens.integrations.feishu.audiences import AnswerAudience
+from project_lens.project_space.policies import effective_scope_from_audit_dict
 from project_lens.runtime.events import AgentEvent, AgentEventType
 
 ROLE_VIEWS_AVAILABLE: tuple[str, ...] = tuple(item.value for item in AnswerAudience)
@@ -34,7 +36,22 @@ def project_answer_to_envelope(
 ) -> dict[str, Any]:
     """Map a verified ProjectAnswer into a Hermes/MCP-safe compact envelope."""
 
-    del audience, format  # reserved for RoleView selection in later phases
+    del format
+    audience_view = None
+    if run.runtime_access is not None and run.channel_id:
+        scope = effective_scope_from_audit_dict(
+            run.runtime_access,
+            project=run.project,
+            actor_id=run.user_id,
+            chat_id=run.channel_id,
+        )
+        audience_view = render_audience_view(
+            answer,
+            role=scope.role,
+            chat_type=scope.chat_type,
+            scope=scope,
+            audience=None if audience in {"", "team"} else audience,
+        )
     evidence_by_id = {item.id: item for item in answer.evidence}
     facts: list[dict[str, Any]] = []
     inferences: list[str] = []
@@ -90,7 +107,9 @@ def project_answer_to_envelope(
         "run_id": str(run.id),
         "trace_id": str(run.trace_id),
         "answer_summary": _truncate(
-            answer.business_summary
+            audience_view.conclusion
+            if audience_view is not None
+            else answer.business_summary
             if facts or not unknowns
             else (unknowns[0] if unknowns else answer.business_summary),
             _SUMMARY_MAX,
@@ -107,14 +126,27 @@ def project_answer_to_envelope(
             for item in answer.recommended_actions[:8]
         ],
         "citations": citations[:12],
+        "audience_view": audience_view.to_dict() if audience_view is not None else None,
         "audit_ref": {
             "trace_id": str(run.trace_id),
             "run_id": str(run.id),
-            "agent_mode": "read_agent",
+            "agent_mode": run.runtime,
+            "runtime": run.runtime,
+            "entry_mode": run.entry_mode,
+            "hermes_loop_id": str(run.hermes_loop_id) if run.hermes_loop_id else None,
             "tool_names": list(resolved_tools),
             "allow_apply": False,
             "skill": answer.skill,
             "status": run.status.value if hasattr(run.status, "value") else str(run.status),
+            **(
+                {
+                    "role": audience_view.role.value,
+                    "chat_type": audience_view.chat_type,
+                    "policy_used": audience_view.policy_used,
+                }
+                if audience_view is not None
+                else {}
+            ),
         },
         "role_views_available": list(ROLE_VIEWS_AVAILABLE),
     }
@@ -129,6 +161,7 @@ def recoverable_error(
     project: ProjectRef | None = None,
     allow_apply: bool = False,
     extras: dict[str, Any] | None = None,
+    runtime: str = "hermes",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ok": False,
@@ -137,7 +170,8 @@ def recoverable_error(
         "retryable": retryable,
         "agent_recovery_hint": agent_recovery_hint,
         "audit_ref": {
-            "agent_mode": "read_agent",
+            "agent_mode": runtime,
+            "runtime": runtime,
             "allow_apply": allow_apply,
             "tool_names": [],
         },

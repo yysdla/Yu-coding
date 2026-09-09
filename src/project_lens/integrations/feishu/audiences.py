@@ -14,6 +14,7 @@ class AnswerAudience(StrEnum):
     BUSINESS = "business"
     QA = "qa"
     MANAGER = "manager"
+    OPS = "ops"
     ONBOARDING = "onboarding"
     EVIDENCE = "evidence"
     DEBUG = "debug"
@@ -25,6 +26,7 @@ _AUDIENCE_TITLES: dict[AnswerAudience, str] = {
     AnswerAudience.BUSINESS: "业务/产品视图",
     AnswerAudience.QA: "测试视图",
     AnswerAudience.MANAGER: "管理/进度视图",
+    AnswerAudience.OPS: "运维视图",
     AnswerAudience.ONBOARDING: "新人理解视图",
     AnswerAudience.EVIDENCE: "证据视图",
     AnswerAudience.DEBUG: "调试视图",
@@ -72,6 +74,14 @@ _SWITCH_MAP: tuple[tuple[AnswerAudience, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        AnswerAudience.OPS,
+        (
+            "给运维看的版本",
+            "运维视角",
+            "处置视图",
+        ),
+    ),
+    (
         AnswerAudience.ONBOARDING,
         (
             "给新人看的版本",
@@ -91,7 +101,9 @@ _SWITCH_MAP: tuple[tuple[AnswerAudience, tuple[str, ...]], ...] = (
     (
         AnswerAudience.DEBUG,
         (
+            "查看运行详情",
             "查看调试信息",
+            "运行详情",
             "调试信息",
             "debug视图",
         ),

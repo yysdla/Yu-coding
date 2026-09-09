@@ -7,15 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from project_lens.agent.investigation import ProjectInvestigationAgent
+from project_lens.application.hermes_runtime import HermesRuntimeService
 from project_lens.application.project_agent_ask import ProjectAgentAskService
 from project_lens.application.project_agent_tools import ProjectAgentToolService
 from project_lens.application.run_service import InMemoryRunRepository, RunService
 from project_lens.context.bootstrap import (
     build_registered_context_engine,
     default_local_project_registrations,
-    to_project_registrations,
 )
+from project_lens.domain.identity import ActorContext
+from project_lens.domain.models import ProjectAnswer, ProjectRef
+from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopResult
 from project_lens.integrations.mcp.handler import (
     FORMAL_TOOL_NAMES,
     TOOL_DESCRIPTION,
@@ -30,12 +32,32 @@ from project_lens.project_space.registry import (
 )
 from project_lens.runtime.events import InMemoryEventSink
 from project_lens.runtime.lifecycle import LifecycleBus
-from project_lens.runtime.read_gateway import ReadContextGateway
-from project_lens.workflow.orchestrator import ProjectWorkflow
-from project_lens.workflow.resolver import ProjectResolver
-from tests.investigation_settings import stub_investigation_settings
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _actor() -> ActorContext:
+    return ActorContext(
+        tenant_key="demo", actor_id="u1", chat_id="mcp-chat",
+        chat_type="group", source="test_fixture", authenticated=True,
+    )
+
+
+class _FakeHermesBridge:
+    async def answer(self, **kwargs):  # noqa: ANN003
+        project = kwargs["project"]
+        return FeishuHermesToolLoopResult(
+            ok=True,
+            envelope={"ok": True, "audit_ref": {"allow_apply": False}},
+            tool_names=("projectlens_search_context",),
+            loop_id=kwargs["loop_id"], trace_id=kwargs["trace_id"],
+            verified_answer=ProjectAnswer(
+                project=project, status="unknown",
+                business_summary="Evidence is insufficient.",
+                technical_summary="Evidence is insufficient.",
+                unknowns=("Need cited evidence.",),
+            ),
+        )
 
 
 def _services() -> tuple[ProjectAgentAskService, ProjectAgentToolService]:
@@ -43,30 +65,21 @@ def _services() -> tuple[ProjectAgentAskService, ProjectAgentToolService]:
     engine, _index = build_registered_context_engine(registrations)
     registry = registry_from_local_registrations(registrations)
     for space in load_project_spaces_from_dir(ROOT / "config" / "projects", base_dir=ROOT):
-        if registry.get(space.tenant_id, space.project_id) is None:
-            registry.register(space)
+        registry.upsert(space)
     events = InMemoryEventSink()
     lifecycle = LifecycleBus(event_sink=events)
-    agent = ProjectInvestigationAgent(
-        context_engine=engine,
-        project_registry=registry,
-        read_gateway=ReadContextGateway(engine),
-        lifecycle=lifecycle,
-        app_settings=stub_investigation_settings(),
-    )
     run_service = RunService(
         InMemoryRunRepository(),
-        ProjectWorkflow(
-            ProjectResolver(to_project_registrations(registrations)),
-            engine,
-            lifecycle=lifecycle,
-        ),
         event_sink=events,
         lifecycle=lifecycle,
-        investigation_agent=agent,
-        agent_mode="read_agent",
+        agent_mode="hermes",
     )
-    ask = ProjectAgentAskService(run_service=run_service, project_registry=registry)
+    ask = ProjectAgentAskService(
+        hermes_runtime=HermesRuntimeService(
+            run_service=run_service, bridge=_FakeHermesBridge()  # type: ignore[arg-type]
+        ),
+        project_registry=registry,
+    )
     tools = ProjectAgentToolService(context_engine=engine, project_registry=registry)
     return ask, tools
 
@@ -87,7 +100,8 @@ async def test_mcp_ask_project_returns_answer_envelope() -> None:
         question="这个项目的订单创建入口在哪里？",
         project_id="payment",
         tenant_id="demo",
-        user_id="mcp-tester",
+        user_id="u1",
+        actor=_actor(),
     )
     assert result["ok"] is True
     assert result["project"]["project_id"] == "payment"
@@ -95,7 +109,7 @@ async def test_mcp_ask_project_returns_answer_envelope() -> None:
     assert result["trace_id"]
     assert result["answer_summary"]
     assert result["audit_ref"]["allow_apply"] is False
-    assert result["audit_ref"]["agent_mode"] == "read_agent"
+    assert result["audit_ref"]["agent_mode"] == "hermes"
     for fact in result["facts"]:
         assert fact["citations"]
     assert result["facts"] or result["unknowns"]
@@ -110,6 +124,7 @@ async def test_mcp_ask_project_not_found() -> None:
         question="介绍一下",
         project_id="nope",
         tenant_id="demo",
+        actor=_actor(),
     )
     assert result["ok"] is False
     assert result["error_code"] == "PROJECT_NOT_FOUND"
@@ -124,6 +139,7 @@ async def test_mcp_ask_write_denied() -> None:
         question="请帮我部署到生产环境",
         project_id="payment",
         tenant_id="demo",
+        actor=_actor(),
     )
     assert result["ok"] is False
     assert result["error_code"] == "WRITE_ACTION_DENIED"
@@ -155,7 +171,9 @@ async def test_mcp_call_projectlens_tool_search_context_envelope() -> None:
         tool_name="projectlens_search_context",
         project_id="payment",
         tenant_id="demo",
+        user_id="u1",
         arguments={"query": "create_order", "limit": 3},
+        actor=_actor(),
     )
     assert result["ok"] is True
     assert result["tool_name"] == "projectlens_search_context"
@@ -172,13 +190,17 @@ async def test_mcp_call_projectlens_tool_query_graph_and_gaps() -> None:
         service,
         tool_name="projectlens_query_graph",
         project_id="payment",
+        user_id="u1",
         arguments={"limit": 5},
+        actor=_actor(),
     )
     gaps = await call_projectlens_tool(
         service,
         tool_name="projectlens_list_knowledge_gaps",
         project_id="payment",
+        user_id="u1",
         arguments={},
+        actor=_actor(),
     )
     assert graph["ok"] is True
     assert graph["internal_tool_name"] == "query_graph"
@@ -195,6 +217,7 @@ async def test_mcp_call_projectlens_tool_rejects_write_with_recovery_hint() -> N
         tool_name="projectlens_deploy",
         project_id="payment",
         arguments={},
+        actor=_actor(),
     )
     assert result["ok"] is False
     assert result["error_code"] in {"TOOL_NOT_ALLOWED", "UNKNOWN_TOOL"}
@@ -209,6 +232,7 @@ async def test_mcp_call_rejects_internal_grep_tool() -> None:
         tool_name="projectlens_grep_project",
         project_id="payment",
         arguments={"query": "password"},
+        actor=_actor(),
     )
     assert result["ok"] is False
     assert result["agent_recovery_hint"]
@@ -243,6 +267,8 @@ async def test_mcp_tool_json_roundtrip_matches_handler() -> None:
         question="知识库现在缺什么资料？",
         project_id="payment",
         tenant_id="demo",
+        user_id="u1",
+        actor=_actor(),
     )
     encoded = json.dumps(payload, ensure_ascii=False)
     decoded = json.loads(encoded)

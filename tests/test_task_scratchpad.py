@@ -275,68 +275,6 @@ def test_session_persists_task_scratchpad_without_memory_write() -> None:
     assert updated.summary.active_skill == "incident_diagnosis"
 
 
-def test_feishu_incident_run_writes_scratchpad_on_session_and_event() -> None:
-    app = create_app()
-    verifier = app.state.feishu_event_service._verifier
-    verifier._verification_token = "project-lens-local-token"
-    verifier._signing_secret = None
-    project = _project()
-    app.state.feishu_event_service._identity_mapper = parse_project_bindings(
-        "",
-        default_project=project,
-    )
-    app.state.feishu_messenger = RecordingFeishuMessenger()
-    app.state.feishu_event_service._messenger = app.state.feishu_messenger
-    client = TestClient(app)
-
-    response = client.post(
-        "/api/v1/feishu/events",
-        json={
-            "schema": "2.0",
-            "token": "project-lens-local-token",
-            "header": {
-                "event_id": "scratchpad-event",
-                "event_type": "im.message.receive_v1",
-                "tenant_key": "demo",
-            },
-            "event": {
-                "sender": {"sender_id": {"user_id": "feishu-user-1"}},
-                "message": {
-                    "message_id": "message-scratchpad",
-                    "chat_id": "chat-1",
-                    "chat_type": "group",
-                    "message_type": "text",
-                    "content": json.dumps({"text": TRACEBACK}),
-                },
-            },
-        },
-    )
-    assert response.status_code == 200
-    run_id = response.json()["run_id"]
-    completed = next(
-        event
-        for event in app.state.run_service.events(UUID(run_id))
-        if event.type.value == "run_completed"
-    )
-    scratch = completed.payload["task_scratchpad"]
-    assert scratch["allow_apply"] is False
-    assert scratch["files_read"]
-    assert scratch["diff_summary"]
-    assert scratch["approval_status"] == "pending"
-
-    session = app.state.conversation_service.get_or_create(
-        tenant_id="demo",
-        chat_id="chat-1",
-        user_id="feishu-user-1",
-        project=project,
-    )
-    pad = task_scratchpad_from_session(session)
-    assert pad is not None
-    assert pad.files_read
-    assert pad.diff_summary
-    assert pad.allow_apply is False
-
-
 def test_merge_never_enables_apply() -> None:
     merged = merge_scratchpads(
         TaskScratchpad(allow_apply=True, phase="X"),

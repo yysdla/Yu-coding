@@ -14,7 +14,32 @@
   "documents_root": "examples/crm_service/knowledge",
   "access_scope": "project:crm:read",
   "file_allowlist": ["src/", "tests/", "knowledge/"],
+  "public_sources": ["knowledge/"],
+  "rag_namespace": "demo:crm:rag",
   "graph_namespace": "demo:crm",
   "memory_namespace": "demo:crm",
-  "default_skill_guides": ["project_intro"]
+  "source_connectors": [
+    {
+      "kind": "repo",
+      "name": "crm_service",
+      "path": "examples/crm_service"
+    },
+    {
+      "kind": "documents",
+      "name": "crm_knowledge",
+      "path": "examples/crm_service/knowledge",
+      "namespace": "demo:crm:rag"
+    }
+  ],
+  "feishu_chat_bindings": [
+    {
+      "tenant_key": "feishu-demo",
+      "chat_id": "oc_crm",
+      "visibility": "team_shared"
+    }
+  ],
+  "default_skill_guides": ["project_intro"],
+  "members": [
+    {"actor_id": "u-shared-1", "roles": ["product"]}
+  ]
 }

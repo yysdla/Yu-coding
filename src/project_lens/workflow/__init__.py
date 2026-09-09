@@ -1,5 +1,5 @@
-"""Traceable project-question workflow."""
+"""Shared workflow helpers still used by Hermes / Feishu (followup, context, skills)."""
 
-from project_lens.workflow.orchestrator import ProjectWorkflow
+from __future__ import annotations
 
-__all__ = ["ProjectWorkflow"]
+__all__: list[str] = []

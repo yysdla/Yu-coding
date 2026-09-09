@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from project_lens.application.feishu_doc_sync import FeishuDocumentSyncService
@@ -17,6 +18,15 @@ from project_lens.integrations.feishu.docs_client import FeishuDocClient
 from project_lens.integrations.feishu.http_adapter import FeishuTenantTokenProvider
 from project_lens.main import create_app
 from tests.test_feishu_doc_sync import RecordingTransport
+
+
+@pytest.fixture(autouse=True)
+def _allow_feishu_transport_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Tests inject RecordingTransport; skip the pytest external-call hard stop.
+    monkeypatch.setattr(
+        "project_lens.integrations.feishu.http_adapter.assert_external_calls_allowed",
+        lambda *_args, **_kwargs: None,
+    )
 
 DEMO = Path(__file__).parents[1] / "examples" / "payment_service"
 

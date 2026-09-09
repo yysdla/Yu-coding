@@ -11,7 +11,9 @@ from project_lens.domain.models import Evidence
 class EvidenceIndex(Protocol):
     def add_many(self, evidence: Iterable[Evidence]) -> int: ...
 
-    def all(self) -> Sequence[Evidence]: ...
+    def all(self, include_revoked: bool = False) -> Sequence[Evidence]: ...
+
+    def revoke_source_ids(self, source_ids: Iterable[str], *, at=None) -> int: ...
 
 
 class InMemoryEvidenceIndex:
@@ -39,9 +41,22 @@ class InMemoryEvidenceIndex:
             del self._items[key]
         return len(to_delete)
 
-    def all(self) -> tuple[Evidence, ...]:
-        return tuple(self._items.values())
+    def revoke_source_ids(self, source_ids: Iterable[str], *, at=None) -> int:
+        from datetime import datetime, timezone
+        ids = set(source_ids)
+        changed = 0
+        for key, item in list(self._items.items()):
+            if item.source.source_id in ids and not item.revoked:
+                self._items[key] = item.model_copy(update={"revoked": True, "revoked_at": at or datetime.now(timezone.utc)})
+                changed += 1
+        return changed
+
+    def active(self) -> tuple[Evidence, ...]:
+        return self.all()
+
+    def all(self, include_revoked: bool = False) -> tuple[Evidence, ...]:
+        items = self._items.values() if include_revoked else (item for item in self._items.values() if not item.revoked)
+        return tuple(items)
 
     def __len__(self) -> int:
         return len(self._items)
-

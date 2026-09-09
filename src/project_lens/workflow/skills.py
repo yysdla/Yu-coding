@@ -15,6 +15,18 @@ class ProjectSkill(StrEnum):
     PROJECT_KNOWLEDGE = "project_knowledge"
 
 
+def skill_routing_enabled() -> bool:
+    """Whether legacy ProjectSkill routing is active in live call sites.
+
+    Modules and helpers remain available for tests / opt-in. Production Hermes
+    path keeps this off by default via Settings.project_skill_routing_enabled.
+    """
+
+    from project_lens.config import settings
+
+    return bool(settings.project_skill_routing_enabled)
+
+
 _ARCHITECTURE_TERMS = (
     "架构",
     "依赖",

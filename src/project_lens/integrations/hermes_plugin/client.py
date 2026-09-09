@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from urllib import error, request
 
@@ -19,6 +20,10 @@ class ProjectLensApiClient:
 
     def __init__(self, config: ProjectLensPluginConfig) -> None:
         self._config = config
+
+    @property
+    def config(self) -> ProjectLensPluginConfig:
+        return self._config
 
     def ask_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._config.api_base_url}/project-agent/ask"
@@ -55,15 +60,22 @@ class ProjectLensApiClient:
         return self._request_json(req)
 
     def _request_json(self, req: request.Request) -> dict[str, Any]:
-        try:
-            with request.urlopen(req, timeout=self._config.timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            return _http_error_envelope(exc)
-        except error.URLError as exc:
-            return _connection_error_envelope(str(exc.reason))
-        except TimeoutError:
-            return _connection_error_envelope("ProjectLens API timed out.")
+        raw = ""
+        attempts = 2
+        for attempt in range(attempts):
+            try:
+                with request.urlopen(req, timeout=self._config.timeout_seconds) as response:
+                    raw = response.read().decode("utf-8")
+                break
+            except error.HTTPError as exc:
+                return _http_error_envelope(exc)
+            except error.URLError as exc:
+                if attempt == attempts - 1:
+                    return _connection_error_envelope(str(exc.reason))
+            except TimeoutError:
+                if attempt == attempts - 1:
+                    return _connection_error_envelope("ProjectLens API timed out.")
+            time.sleep(0.25)
 
         try:
             decoded = json.loads(raw)

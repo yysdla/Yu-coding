@@ -7,7 +7,10 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from project_lens.context.models import TimeRange
+from project_lens.context.source_records import FactType, SourceRecord
 from project_lens.domain.feishu_doc_sync import FeishuDocSyncStatus
+from project_lens.application.connector_sync_status import ConnectorSyncState
+from project_lens.application.wiki_compiler import WikiPageDraft, WikiPageType
 from project_lens.domain.models import (
     AgentRun,
     ChangeImpact,
@@ -43,6 +46,14 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     version: str
+
+
+class ReadinessResponse(BaseModel):
+    status: str
+    service: str
+    version: str
+    ready: bool
+    checks: dict[str, object] = Field(default_factory=dict)
 
 
 class ProjectSnapshotRequest(BaseModel):
@@ -95,6 +106,206 @@ class ProjectKnowledgeGapsRequest(BaseModel):
 
 class ProjectKnowledgeGapsResponse(KnowledgeGapReport):
     pass
+
+
+class ProjectFactResolutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+    fact_type: FactType
+
+
+class SourceRecordResponse(BaseModel):
+    source_id: str
+    source_type: str
+    project_id: str
+    title: str
+    raw_uri: str
+    revision: str
+    observed_at: datetime
+    effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    owner: str | None = None
+    status: str
+    topic: str
+    authority_scope: tuple[str, ...] = ()
+    supersedes: tuple[str, ...] = ()
+    related_sources: tuple[str, ...] = ()
+    access_scope: str
+    content_hash: str
+    evidence_refs: tuple[str, ...] = ()
+
+    @classmethod
+    def from_source(cls, source: SourceRecord) -> "SourceRecordResponse":
+        return cls.model_validate(source.model_dump())
+
+
+class ProjectFactResolutionResponse(BaseModel):
+    fact_type: FactType
+    selected: SourceRecordResponse | None = None
+    candidates: tuple[SourceRecordResponse, ...] = ()
+    conflicts: tuple[SourceRecordResponse, ...] = ()
+    reason: str
+
+
+class SourceGapResponse(BaseModel):
+    status: str
+    fact_type: FactType
+    project_id: str
+    reason: str
+    evidence_ids: tuple[str, ...] = ()
+    suggested_source_type: str | None = None
+
+
+class ProjectSourceGapsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+
+
+class ProjectSourceGapsResponse(BaseModel):
+    project: ProjectRef
+    gaps: tuple[SourceGapResponse, ...] = ()
+
+
+class ProjectSourceRecordsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+    source_id: str | None = Field(default=None, max_length=500)
+    include_revoked: bool = False
+
+
+class ProjectSourceRecordsResponse(BaseModel):
+    project: ProjectRef
+    records: tuple[SourceRecordResponse, ...] = ()
+
+
+class ConnectorSyncStatusResponse(BaseModel):
+    connector: str
+    cursor: str | None = None
+    last_attempt_at: datetime | None = None
+    last_success_at: datetime | None = None
+    error_count: int = 0
+    last_error: str | None = None
+    indexed_count: int = 0
+    failed_count: int = 0
+    stale: bool = False
+
+    @classmethod
+    def from_state(cls, state: ConnectorSyncState, *, stale: bool) -> "ConnectorSyncStatusResponse":
+        return cls(
+            connector=state.connector,
+            cursor=state.cursor.token if state.cursor else None,
+            last_attempt_at=state.last_attempt_at,
+            last_success_at=state.last_success_at,
+            error_count=state.error_count,
+            last_error=state.last_error,
+            indexed_count=state.indexed_count,
+            failed_count=state.failed_count,
+            stale=stale,
+        )
+
+
+class ProjectConnectorSyncStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+
+
+class ProjectConnectorSyncStatusResponse(BaseModel):
+    project: ProjectRef
+    statuses: tuple[ConnectorSyncStatusResponse, ...] = ()
+
+
+class ProjectConnectorSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+    connectors: tuple[str, ...] = ()
+
+
+class ConnectorSyncResultResponse(BaseModel):
+    connector: str
+    ok: bool
+    added_count: int = 0
+    updated_count: int = 0
+    revoked_count: int = 0
+    indexed_count: int = 0
+    failed_count: int = 0
+    cursor: str | None = None
+    stale: bool = False
+    freshness_warning: str | None = None
+    error: str | None = None
+
+
+class ProjectConnectorSyncResponse(BaseModel):
+    project: ProjectRef
+    results: tuple[ConnectorSyncResultResponse, ...] = ()
+
+
+class ProjectWikiDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+    compile: bool = True
+
+
+class WikiPageDraftResponse(BaseModel):
+    tenant_id: str
+    project_id: str
+    page_type: WikiPageType
+    title: str
+    status: str
+    content: str
+    source_keys: tuple[str, ...] = ()
+    generated_at: datetime
+
+    @classmethod
+    def from_draft(cls, draft: WikiPageDraft) -> "WikiPageDraftResponse":
+        return cls(
+            tenant_id=draft.tenant_id,
+            project_id=draft.project_id,
+            page_type=draft.page_type,
+            title=draft.title,
+            status=draft.status,
+            content=draft.content,
+            source_keys=draft.source_keys,
+            generated_at=draft.generated_at,
+        )
+
+
+class ProjectWikiDraftResponse(BaseModel):
+    project: ProjectRef
+    pages: tuple[WikiPageDraftResponse, ...] = ()
+
+
+class ProjectWikiReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+    page_type: WikiPageType
+    approved: bool
+
+
+class ProjectWikiReviewResponse(BaseModel):
+    project: ProjectRef
+    page: WikiPageDraftResponse
+    published_uri: str | None = None
 
 
 class FeishuDocsSyncRequest(BaseModel):

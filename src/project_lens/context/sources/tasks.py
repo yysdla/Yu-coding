@@ -26,6 +26,16 @@ class TaskRecord(BaseModel):
     assignee: str | None = Field(default=None, max_length=100)
     related_incident_id: str | None = Field(default=None, max_length=200)
     related_commit_sha: str | None = Field(default=None, max_length=64)
+    related_pr_id: str | None = Field(default=None, max_length=200)
+    branch: str | None = Field(default=None, max_length=200)
+    start_at: datetime | None = None
+    due_at: datetime | None = None
+    owner_ids: tuple[str, ...] = ()
+    dependency_ids: tuple[str, ...] = ()
+    dependency_status: str | None = Field(default=None, max_length=50)
+    requirement_id: str | None = Field(default=None, max_length=200)
+    acceptance_criteria: tuple[str, ...] = ()
+    requires_code: bool = False
     url: str | None = Field(default=None, max_length=1_000)
 
 

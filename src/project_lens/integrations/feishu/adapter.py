@@ -18,6 +18,8 @@ class FeishuMessenger(Protocol):
 
     async def post_card(self, chat_id: str, card: dict[str, Any]) -> None: ...
 
+    async def post_user_card(self, open_id: str, card: dict[str, Any]) -> None: ...
+
 
 class RecordingFeishuMessenger:
     """Local adapter used by tests and demos before real Feishu API credentials exist."""
@@ -39,6 +41,15 @@ class RecordingFeishuMessenger:
             FeishuMessage(
                 chat_id=chat_id,
                 message_type="interactive",
+                content=card,
+            )
+        )
+
+    async def post_user_card(self, open_id: str, card: dict[str, Any]) -> None:
+        self.messages.append(
+            FeishuMessage(
+                chat_id=open_id,
+                message_type="interactive:p2p",
                 content=card,
             )
         )

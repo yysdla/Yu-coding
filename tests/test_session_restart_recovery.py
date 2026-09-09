@@ -67,7 +67,10 @@ def _answer(project: ProjectRef) -> ProjectAnswer:
     )
 
 
-def test_sqlite_session_recovers_after_new_database_connection(tmp_path: Path) -> None:
+def test_sqlite_session_recovers_after_new_database_connection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     db_path = tmp_path / "conversation_restart.db"
     project = _project()
 
@@ -111,6 +114,10 @@ def test_sqlite_session_recovers_after_new_database_connection(tmp_path: Path) -
     assert recovered.recent_turns[0].text == "AttributeError on coupon"
     assert recovered.task_scratchpad.get("files_read") == ["src/order_service.py"]
 
+    from project_lens.config import settings
+
+    # Live path pauses skill routing; opt in to assert rewriter still works.
+    monkeypatch.setattr(settings, "project_skill_routing_enabled", True)
     question, rewrite = service_b.prepare_question(recovered, "那是谁改的？")
     assert rewrite is not None
     assert "故障诊断" in rewrite

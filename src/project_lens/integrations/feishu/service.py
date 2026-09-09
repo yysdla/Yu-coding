@@ -12,17 +12,34 @@ from fastapi import BackgroundTasks, HTTPException, status
 from pydantic import ValidationError
 
 from project_lens.application.conversation_service import ConversationService
+from project_lens.application.hermes_runtime import (
+    HermesRuntimeService,
+    PendingHermesExecution,
+)
+from project_lens.application.message_access_context import MessageAccessContext
 from project_lens.application.feishu_doc_sync_status import FeishuDocSyncStatusStore
 from project_lens.application.memory_service import propose_memory_from_answer
 from project_lens.application.run_service import RunService
+from project_lens.application.project_agent_run_detail import (
+    ProjectAgentRunDetailRequest,
+    ProjectAgentRunDetailService,
+)
+from project_lens.application.risk_engine import RiskEngine
+from project_lens.application.risk_feedback_service import (
+    RiskFeedbackService,
+    feedback_idempotency_key,
+    parse_risk_feedback_text,
+)
+from project_lens.application.risk_notification_service import RiskNotificationService
 from project_lens.context.memory_store import MemoryStore
+from project_lens.context.memory_retrieval import build_memory_summary
 from project_lens.domain.conversation import ConversationSession
 from project_lens.domain.feishu_doc_sync import FeishuDocSyncStatus
 from project_lens.domain.memory import MemoryProposal, ProjectMemory
+from project_lens.domain.identity import ActorContext
 from project_lens.domain.models import ProjectRef, RunStatus
 from project_lens.integrations.feishu.adapter import FeishuMessenger
 from project_lens.integrations.feishu.audiences import AnswerAudience, detect_audience_switch
-from project_lens.integrations.feishu.audit_summary import build_feishu_audit_summary
 from project_lens.integrations.feishu.cards import (
     render_about_bot_card,
     render_answer_card,
@@ -30,15 +47,17 @@ from project_lens.integrations.feishu.cards import (
     render_failure_card,
     render_feishu_doc_sync_status_card,
     render_memory_decision_card,
-    render_progress_text,
+    render_run_detail_card,
+    render_risk_feedback_result_card,
 )
 from project_lens.integrations.feishu.commands import rewrite_feishu_message
 from project_lens.integrations.feishu.idempotency import EventDeduplicator
 from project_lens.integrations.feishu.identity import FeishuRunContext
 from project_lens.integrations.feishu.hermes_tool_loop import (
     FeishuHermesToolLoopBridge,
-    render_hermes_tool_loop_card,
+    hermes_loop_scratchpad_entry,
 )
+from project_lens.integrations.feishu.hermes_context import build_hermes_project_context
 from project_lens.integrations.feishu.ingress import (
     FeishuIngressKind,
     FeishuIngressRouter,
@@ -46,10 +65,7 @@ from project_lens.integrations.feishu.ingress import (
 )
 from project_lens.integrations.feishu.models import FeishuEventCallback
 from project_lens.integrations.feishu.security import FeishuRequestVerifier
-from project_lens.project_space.policies import (
-    ProjectRuntimeContextResolver,
-    effective_scope_to_audit_dict,
-)
+from project_lens.project_space.policies import EffectiveAccessScope, ProjectRuntimeContextResolver
 from project_lens.runtime.lifecycle import LifecycleBus, LifecycleEventType
 from project_lens.runtime.memory_approval_gateway import MemoryApprovalGateway
 from project_lens.workflow.followup import FollowupRewriter
@@ -92,6 +108,11 @@ class FeishuEventService:
         lifecycle: LifecycleBus | None = None,
         runtime_context_resolver: ProjectRuntimeContextResolver | None = None,
         hermes_tool_loop_bridge: FeishuHermesToolLoopBridge | None = None,
+        hermes_runtime: HermesRuntimeService | None = None,
+        run_detail_service: ProjectAgentRunDetailService | None = None,
+        risk_feedback_service: RiskFeedbackService | None = None,
+        risk_engine: RiskEngine | None = None,
+        risk_notification_service: RiskNotificationService | None = None,
     ) -> None:
         self._run_service = run_service
         self._verifier = verifier
@@ -112,8 +133,22 @@ class FeishuEventService:
         )
         self._runtime_context_resolver = runtime_context_resolver
         self._hermes_tool_loop_bridge = hermes_tool_loop_bridge
+        self._hermes_runtime = hermes_runtime or (
+            HermesRuntimeService(run_service=run_service, bridge=hermes_tool_loop_bridge)
+            if hermes_tool_loop_bridge is not None
+            else None
+        )
+        self._run_detail_service = run_detail_service
+        self._risk_feedback = risk_feedback_service
+        self._risk_engine = risk_engine
+        self._risk_notifications = risk_notification_service
         self._followup = FollowupRewriter()
         self._ingress = FeishuIngressRouter()
+
+    def _run_detail(self, request: ProjectAgentRunDetailRequest) -> dict[str, Any]:
+        if self._run_detail_service is None:
+            raise RuntimeError("run_detail_service is not configured")
+        return self._run_detail_service.run_detail(request)
 
     def handle_callback(
         self,
@@ -207,14 +242,73 @@ class FeishuEventService:
         )
         if not text:
             return FeishuCallbackResult(status="ignored")
-        sender_id = payload.event.sender.sender_id.user_id or payload.event.sender.sender_id.open_id
-        if not sender_id:
-            raise HTTPException(status_code=400, detail="missing Feishu sender id")
+
+        natural_feedback = parse_risk_feedback_text(text)
+        if natural_feedback is not None and self._risk_feedback is not None:
+            risk_id, feedback_action, reason = natural_feedback
+            actor_id = str(payload.event.sender.sender_id.open_id or "").strip()
+            if not actor_id:
+                raise HTTPException(status_code=400, detail="missing Feishu sender open_id")
+            try:
+                result = self._risk_feedback.submit(
+                    risk_id=risk_id,
+                    actor_id=actor_id,
+                    action=feedback_action,
+                    idempotency_key=feedback_idempotency_key(
+                        event_id=payload.header.event_id,
+                        risk_id=risk_id,
+                        actor_id=actor_id,
+                    ),
+                    reason=reason,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="risk not found") from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            finding = self._risk_engine.get(risk_id) if self._risk_engine else None
+            if finding is not None:
+                background_tasks.add_task(
+                    self._messenger.post_user_card,
+                    actor_id,
+                    render_risk_feedback_result_card(
+                        finding,
+                        action=result.feedback.action.value,
+                        duplicate=result.duplicate,
+                    ),
+                )
+                if (
+                    result.feedback.action.value == "request_help"
+                    and self._risk_notifications is not None
+                ):
+                    background_tasks.add_task(
+                        self._risk_notifications.request_help,
+                        finding,
+                        actor_id=actor_id,
+                    )
+            return FeishuCallbackResult(status="accepted")
+
+        tenant_key = payload.header.tenant_key.strip()
+        if not tenant_key:
+            raise HTTPException(status_code=400, detail="missing Feishu tenant_key")
+
+        open_id = payload.event.sender.sender_id.open_id
+        if not open_id:
+            raise HTTPException(status_code=400, detail="missing Feishu sender open_id")
+
+        chat_id = message.chat_id.strip()
+        if not chat_id:
+            raise HTTPException(status_code=400, detail="missing Feishu chat_id")
+
+        chat_type = message.chat_type
+        if chat_type not in {"p2p", "group"}:
+            raise HTTPException(status_code=400, detail="missing or invalid Feishu chat_type")
+
         try:
             context: FeishuRunContext = self._identity_mapper.resolve(
-                tenant_key=payload.header.tenant_key,
-                chat_id=message.chat_id,
-                user_id=sender_id,
+                tenant_key=tenant_key,
+                chat_id=chat_id,
+                user_id=open_id,
+                chat_type=chat_type,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
@@ -225,7 +319,11 @@ class FeishuEventService:
             user_id=context.user_id,
             project=context.project,
         )
-        session, runtime_access = self._attach_runtime_access(session, context)
+        message_access = self._resolve_message_access(
+            context,
+            message_id=message.message_id,
+        )
+        session, _runtime_access = self._attach_runtime_access(session, message_access)
         question_for_run, followup_rewrite = self._conversation.prepare_question(session, text)
         ingress = self._ingress.decide(
             text,
@@ -278,16 +376,29 @@ class FeishuEventService:
             )
             return FeishuCallbackResult(status="accepted")
 
-        if ingress.kind == FeishuIngressKind.PROJECT_QUESTION and self._hermes_tool_loop_bridge is not None:
+        if ingress.creates_project_run:
+            try:
+                pending = self._prepare_hermes_execution(
+                    project=context.project,
+                    actor=context.actor,
+                    scope=message_access.effective_scope,
+                    question=question_for_run,
+                    entry_mode=ingress.entry_mode or "natural_project_question",
+                    session=session,
+                )
+            except PermissionError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
+                ) from exc
             background_tasks.add_task(
-                self._execute_hermes_tool_loop_and_reply,
-                context.project,
+                self._execute_prepared_hermes_tool_loop_and_reply,
+                pending,
                 message.chat_id,
-                context.user_id,
-                text,
                 session.session_id,
+                text,
+                audit_rewrite,
             )
-            return FeishuCallbackResult(status="accepted")
+            return FeishuCallbackResult(status="accepted", run_id=str(pending.run.id))
 
         # Bot/meta questions (e.g. 你用的是什么模型) — never project Skill analysis.
         if ingress.kind == FeishuIngressKind.BOT_META:
@@ -320,44 +431,38 @@ class FeishuEventService:
             )
             return FeishuCallbackResult(status="accepted")
 
-        run = self._run_service.create(
-            project=context.project,
-            user_id=context.user_id,
-            channel_id=context.channel_id,
-            question=question_for_run,
-            runtime_access=runtime_access,
-            entry_mode=ingress.entry_mode,
-        )
-        background_tasks.add_task(
-            self._execute_and_reply,
-            str(run.id),
-            message.chat_id,
-            str(session.session_id),
-            text,
-            audit_rewrite,
-            context.user_id,
-        )
-        return FeishuCallbackResult(status="accepted", run_id=str(run.id))
+        raise RuntimeError(f"unsupported Feishu ingress: {ingress.kind}")
+
+    def _resolve_message_access(
+        self,
+        context: FeishuRunContext,
+        *,
+        message_id: str | None = None,
+    ) -> MessageAccessContext:
+        if self._runtime_context_resolver is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="runtime context resolver is not configured",
+            )
+        try:
+            return MessageAccessContext.resolve_for_actor(
+                actor=context.actor,
+                project_id=context.project.project_id,
+                tenant_id=context.project.tenant_id,
+                resolver=self._runtime_context_resolver,
+                message_id=message_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     def _attach_runtime_access(
         self,
         session: ConversationSession,
-        context: FeishuRunContext,
-    ) -> tuple[ConversationSession, dict[str, object] | None]:
-        """Resolve EffectiveAccessScope after identity; optional when resolver unset."""
+        message_access: MessageAccessContext,
+    ) -> tuple[ConversationSession, dict[str, object]]:
+        """Persist per-message scope audit bounds; do not reuse across speakers."""
 
-        if self._runtime_context_resolver is None:
-            return session, None
-        try:
-            resolved = self._runtime_context_resolver.resolve(
-                tenant_id=context.project.tenant_id,
-                project_id=context.project.project_id,
-                chat_id=context.channel_id,
-                user_id=context.user_id,
-            )
-        except PermissionError as exc:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-        runtime_access = effective_scope_to_audit_dict(resolved.effective_scope)
+        runtime_access = message_access.runtime_access_audit()
         saved = self._conversation.attach_runtime_access(session, runtime_access)
         return saved, runtime_access
 
@@ -403,13 +508,102 @@ class FeishuEventService:
             question = str(value.get("question") or "").strip()
             if not question or not chat_id:
                 return FeishuCallbackResult(status="ignored")
+            operator_open_id = str(operator.get("open_id") or "").strip()
+            if not operator_open_id:
+                raise HTTPException(status_code=400, detail="missing Feishu operator open_id")
+            if not tenant_key.strip():
+                raise HTTPException(status_code=400, detail="missing Feishu tenant_key")
             return self._start_question_from_card(
-                tenant_key=tenant_key,
+                tenant_key=tenant_key.strip(),
                 chat_id=chat_id,
-                user_id=decided_by,
+                user_id=operator_open_id,
                 text=question,
                 background_tasks=background_tasks,
             )
+
+        if action_name == "projectlens_run_detail":
+            run_id_raw = str(value.get("run_id") or "").strip()
+            operator_open_id = str(operator.get("open_id") or "").strip()
+            if not run_id_raw or not operator_open_id or not chat_id or not tenant_key.strip():
+                return FeishuCallbackResult(status="ignored")
+            try:
+                run_id = UUID(run_id_raw)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="invalid run_id")
+            try:
+                actor_context = self._identity_mapper.resolve(
+                    tenant_key=tenant_key.strip(),
+                    chat_id=chat_id,
+                    user_id=operator_open_id,
+                    chat_type=str(context.get("chat_type") or "group"),
+                )
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            detail = self._run_detail(
+                ProjectAgentRunDetailRequest(
+                    run_id=run_id,
+                    actor=actor_context.actor,
+                    audience="team",
+                )
+            )
+            background_tasks.add_task(
+                self._messenger.post_card,
+                chat_id,
+                render_run_detail_card(detail),
+            )
+            return FeishuCallbackResult(status="accepted", run_id=run_id_raw)
+
+        if action_name.startswith("risk_"):
+            if self._risk_feedback is None or self._risk_engine is None:
+                return FeishuCallbackResult(status="ignored")
+            risk_id = str(value.get("risk_id") or "").strip()
+            operator_open_id = str(operator.get("open_id") or "").strip()
+            if not risk_id or not operator_open_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="risk feedback requires risk_id and operator open_id",
+                )
+            raw_action = action_name.removeprefix("risk_")
+            reason = str(value.get("reason") or "").strip()
+            try:
+                result = self._risk_feedback.submit(
+                    risk_id=risk_id,
+                    actor_id=operator_open_id,
+                    action=raw_action,
+                    idempotency_key=feedback_idempotency_key(
+                        event_id=event_id,
+                        risk_id=risk_id,
+                        actor_id=operator_open_id,
+                    ),
+                    reason=reason,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="risk not found") from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            finding = self._risk_engine.get(risk_id)
+            if finding is not None:
+                background_tasks.add_task(
+                    self._messenger.post_user_card,
+                    operator_open_id,
+                    render_risk_feedback_result_card(
+                        finding,
+                        action=result.feedback.action.value,
+                        duplicate=result.duplicate,
+                    ),
+                )
+                if (
+                    result.feedback.action.value == "request_help"
+                    and self._risk_notifications is not None
+                ):
+                    background_tasks.add_task(
+                        self._risk_notifications.request_help,
+                        finding,
+                        actor_id=operator_open_id,
+                    )
+            return FeishuCallbackResult(status="accepted")
 
         if action_name not in {"memory_approve", "memory_reject"}:
             return FeishuCallbackResult(status="ignored")
@@ -484,12 +678,16 @@ class FeishuEventService:
         user_id: str,
         text: str,
         background_tasks: BackgroundTasks,
+        chat_type: str = "group",
     ) -> FeishuCallbackResult:
+        if chat_type not in {"p2p", "group"}:
+            chat_type = "group"
         try:
             context: FeishuRunContext = self._identity_mapper.resolve(
                 tenant_key=tenant_key,
                 chat_id=chat_id,
                 user_id=user_id,
+                chat_type=chat_type,  # type: ignore[arg-type]
             )
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
@@ -500,7 +698,8 @@ class FeishuEventService:
             user_id=context.user_id,
             project=context.project,
         )
-        session, runtime_access = self._attach_runtime_access(session, context)
+        message_access = self._resolve_message_access(context)
+        session, _runtime_access = self._attach_runtime_access(session, message_access)
         question_for_run, followup_rewrite = self._conversation.prepare_question(session, text)
         ingress = self._ingress.decide(
             text,
@@ -537,41 +736,155 @@ class FeishuEventService:
             )
             return FeishuCallbackResult(status="accepted")
 
-        if ingress.kind == FeishuIngressKind.PROJECT_QUESTION and self._hermes_tool_loop_bridge is not None:
-            self._conversation.record_turn(
-                session,
-                user_id=context.user_id,
-                text=text,
-                rewritten_question=audit_rewrite,
-            )
-            background_tasks.add_task(
-                self._execute_hermes_tool_loop_and_reply,
-                context.project,
-                chat_id,
-                context.user_id,
-                text,
-                session.session_id,
-            )
-            return FeishuCallbackResult(status="accepted")
-
-        run = self._run_service.create(
+        pending = self._prepare_hermes_execution(
             project=context.project,
-            user_id=context.user_id,
-            channel_id=context.channel_id,
+            actor=context.actor,
+            scope=message_access.effective_scope,
             question=question_for_run,
-            runtime_access=runtime_access,
-            entry_mode=ingress.entry_mode,
+            entry_mode=ingress.entry_mode or "feishu_card_ask",
+            session=session,
         )
         background_tasks.add_task(
-            self._execute_and_reply,
-            str(run.id),
+            self._execute_prepared_hermes_tool_loop_and_reply,
+            pending,
             chat_id,
-            str(session.session_id),
+            session.session_id,
             text,
             audit_rewrite,
-            context.user_id,
         )
-        return FeishuCallbackResult(status="accepted", run_id=str(run.id))
+        return FeishuCallbackResult(status="accepted", run_id=str(pending.run.id))
+
+    def _prepare_hermes_execution(
+        self,
+        *,
+        project: ProjectRef,
+        actor: ActorContext,
+        scope: EffectiveAccessScope,
+        question: str,
+        entry_mode: str,
+        session: ConversationSession | None,
+    ) -> PendingHermesExecution:
+        runtime = self._hermes_runtime
+        if runtime is None:
+            raise RuntimeError("Hermes runtime is not configured")
+        memories: tuple[ProjectMemory, ...] = ()
+        memory_summary = None
+        if session is not None and self._memory_store is not None:
+            memory_summary = self._memory_store.get_memory_summary(session.project)
+            if memory_summary is None:
+                memories = self._memory_store.list_memories(session.project)
+        context = build_hermes_project_context(
+            session=session,
+            memories=memories,
+            memory_summary=(
+                memory_summary
+                if memory_summary is not None
+                else build_memory_summary(memories)
+            ),
+            runtime_access={
+                "tenant_id": scope.project.tenant_id,
+                "project_id": scope.project.project_id,
+                "actor_id": scope.actor_id,
+                "chat_id": scope.chat_id,
+                "role": scope.role.value,
+                "visibility_level": scope.visibility_level.value,
+                "policy_version": scope.policy_version,
+            },
+        )
+        return runtime.prepare(
+            project=project,
+            actor=actor,
+            scope=scope,
+            question=question,
+            entry_mode=entry_mode,
+            context=context,
+        )
+
+    async def _execute_prepared_hermes_tool_loop_and_reply(
+        self,
+        pending: PendingHermesExecution,
+        chat_id: str,
+        session_id: UUID | None = None,
+        raw_text: str | None = None,
+        followup_rewrite: str | None = None,
+    ) -> None:
+        runtime = self._hermes_runtime
+        if runtime is None:
+            raise RuntimeError("Hermes runtime is not configured")
+        execution = await runtime.execute_prepared(pending)
+        executed = execution.run
+        session = self._conversation.store.get(session_id) if session_id is not None else None
+        if session is not None:
+            session = self._conversation.record_turn(
+                session,
+                user_id=pending.actor.actor_id,
+                text=raw_text or pending.question,
+                rewritten_question=followup_rewrite,
+                run_id=executed.id,
+                answer=execution.answer,
+            )
+            self._conversation.attach_hermes_tool_loop(
+                session, hermes_loop_scratchpad_entry(execution.envelope)
+            )
+        await self._render_hermes_execution(
+            chat_id=chat_id,
+            execution=execution,
+        )
+
+    async def _render_hermes_execution(
+        self,
+        *,
+        chat_id: str,
+        execution: Any,
+    ) -> None:
+        executed = execution.run
+        if not execution.ok:
+            await self._messenger.post_card(chat_id, render_failure_card(executed))
+            return
+        if executed.answer is None:
+            await self._messenger.post_card(chat_id, render_failure_card(executed))
+            return
+        memory_proposal = None
+        if self._memory_gateway is not None:
+            candidate = propose_memory_from_answer(
+                executed.answer,
+                proposed_by=executed.user_id,
+            )
+            if candidate is not None:
+                try:
+                    memory_proposal = self._memory_gateway.create_memory_proposal(candidate)
+                    self._lifecycle.emit(
+                        LifecycleEventType.MEMORY_PROPOSED,
+                        run_id=executed.id,
+                        trace_id=executed.trace_id,
+                        project=executed.project,
+                        payload={
+                            "proposal_id": str(memory_proposal.id),
+                            "proposed_by": memory_proposal.proposed_by,
+                            "source": "hermes",
+                        },
+                    )
+                    self._lifecycle.emit(
+                        LifecycleEventType.APPROVAL_REQUESTED,
+                        run_id=executed.id,
+                        trace_id=executed.trace_id,
+                        project=executed.project,
+                        payload={
+                            "proposal_id": str(memory_proposal.id),
+                            "kind": "memory_proposal",
+                            "allowed_approvers": list(memory_proposal.allowed_approvers),
+                        },
+                    )
+                except ValueError:
+                    memory_proposal = None
+        await self._messenger.post_card(
+            chat_id,
+            render_answer_card(
+                executed,
+                executed.answer,
+                memory_proposal=memory_proposal,
+            ),
+        )
 
     def _try_role_view_switch(
         self,
@@ -671,155 +984,4 @@ class FeishuEventService:
                 statuses,
                 read_error=read_error,
             ),
-        )
-
-    async def _execute_and_reply(
-        self,
-        run_id: str,
-        chat_id: str,
-        session_id: str | None = None,
-        raw_text: str | None = None,
-        followup_rewrite: str | None = None,
-        user_id: str | None = None,
-    ) -> None:
-        run = self._run_service.get(UUID(run_id))
-        if run is None:
-            return
-        await self._messenger.post_text(chat_id, render_progress_text("阅读项目资料", run))
-        session = None
-        memories = ()
-        if session_id:
-            session = self._conversation.store.get(UUID(session_id))
-            if session is not None and self._memory_store is not None:
-                memories = self._memory_store.list_memories(session.project)
-        executed = await self._run_service.execute(
-            run.id,
-            session=session,
-            memories=memories,
-        )
-        if executed is None:
-            return
-        if session is not None and raw_text and user_id:
-            task_state = None
-            workflow = getattr(self._run_service, "_workflow", None)
-            if workflow is not None and getattr(workflow, "last_context_pack", None):
-                task_state = workflow.last_context_pack.task_state
-            self._conversation.record_turn(
-                session,
-                user_id=user_id,
-                text=raw_text,
-                rewritten_question=followup_rewrite,
-                run_id=executed.id,
-                answer=executed.answer if executed.status == RunStatus.COMPLETED else None,
-                task_state=task_state,
-            )
-        if executed.status == RunStatus.COMPLETED and executed.answer is not None:
-            memory_proposal = None
-            if self._memory_gateway is not None:
-                candidate = propose_memory_from_answer(
-                    executed.answer,
-                    proposed_by=executed.user_id,
-                )
-                if candidate is not None:
-                    try:
-                        memory_proposal = self._memory_gateway.create_memory_proposal(
-                            candidate
-                        )
-                        self._lifecycle.emit(
-                            LifecycleEventType.MEMORY_PROPOSED,
-                            run_id=executed.id,
-                            trace_id=executed.trace_id,
-                            project=executed.project,
-                            payload={
-                                "proposal_id": str(memory_proposal.id),
-                                "proposed_by": memory_proposal.proposed_by,
-                                "memory_gateway": self._memory_gateway.audit_summary(),
-                            },
-                        )
-                        self._lifecycle.emit(
-                            LifecycleEventType.APPROVAL_REQUESTED,
-                            run_id=executed.id,
-                            trace_id=executed.trace_id,
-                            project=executed.project,
-                            payload={
-                                "proposal_id": str(memory_proposal.id),
-                                "kind": "memory_proposal",
-                                "allowed_approvers": list(
-                                    memory_proposal.allowed_approvers
-                                ),
-                            },
-                        )
-                    except ValueError:
-                        memory_proposal = None
-            events = self._run_service.events(executed.id)
-            adapter_refs = None
-            pack_refs = None
-            prompt_refs = None
-            workflow = getattr(self._run_service, "_workflow", None)
-            if workflow is not None:
-                last_adapter = getattr(workflow, "last_model_adapter_result", None)
-                if last_adapter is not None:
-                    adapter_refs = last_adapter.audit_refs()
-                last_pack = getattr(workflow, "last_context_pack", None)
-                if last_pack is not None:
-                    pack_refs = last_pack.audit_refs()
-                last_prompt = getattr(workflow, "last_context_prompt", None)
-                if last_prompt is not None:
-                    prompt_refs = last_prompt.audit_refs
-            audit_summary = build_feishu_audit_summary(
-                executed,
-                executed.answer,
-                events=events,
-                model_adapter_refs=adapter_refs,
-                context_pack_refs=pack_refs,
-                context_prompt_refs=prompt_refs,
-            )
-            await self._messenger.post_card(
-                chat_id,
-                render_answer_card(
-                    executed,
-                    executed.answer,
-                    memory_proposal=memory_proposal,
-                    audit_summary=audit_summary,
-                ),
-            )
-        else:
-            await self._messenger.post_card(chat_id, render_failure_card(executed))
-
-    async def _execute_hermes_tool_loop_and_reply(
-        self,
-        project: ProjectRef,
-        chat_id: str,
-        user_id: str,
-        raw_text: str,
-        session_id: UUID | None = None,
-    ) -> None:
-        bridge = self._hermes_tool_loop_bridge
-        if bridge is None:
-            return
-        result = await bridge.answer(
-            project=project,
-            question=raw_text,
-            user_id=user_id,
-            chat_id=chat_id,
-        )
-        if session_id is not None:
-            session = self._conversation.store.get(session_id)
-            if session is not None:
-                self._conversation.record_turn(
-                    session,
-                    user_id=user_id,
-                    text=raw_text,
-                    rewritten_question=raw_text,
-                    answer=None,
-                )
-        if not result.ok:
-            await self._messenger.post_card(
-                chat_id,
-                render_hermes_tool_loop_card(result.output_markdown or "Hermes tool loop failed."),
-            )
-            return
-        await self._messenger.post_card(
-            chat_id,
-            render_hermes_tool_loop_card(result.output_markdown),
         )

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field
 
 from project_lens.domain.models import ProjectRef
+from project_lens.context.source_records import SourceRecord, SourceType
+from hashlib import sha256
 
 if TYPE_CHECKING:
     from project_lens.integrations.feishu.docs_client import FeishuDocRaw
@@ -59,4 +61,28 @@ def to_feishu_document_record(
         updated_at=raw.updated_at,
         owner_user_id=raw.owner_user_id,
         access_scope=access_scope,
+    )
+
+
+def to_source_record(record: FeishuDocumentRecord) -> SourceRecord:
+    """Preserve one immutable snapshot per Feishu document revision."""
+    content_hash = sha256(record.content.encode("utf-8")).hexdigest()
+    return SourceRecord(
+        source_id=record.doc_token,
+        source_type=SourceType.FEISHU_DOCUMENT,
+        tenant_id=record.tenant_id,
+        project_id=record.project_id,
+        title=record.title,
+        raw_uri=record.doc_url,
+        revision=record.revision,
+        observed_at=record.updated_at,
+        owner=record.owner_user_id,
+        status="published",
+        topic="document",
+        authority_scope=("requirement_scope", "technical_decision", "test_status"),
+        access_scope=record.access_scope,
+        content_hash=content_hash,
+        raw_content_ref=record.doc_url,
+        content=record.content,
+        metadata={"doc_token": record.doc_token, "revision": record.revision},
     )

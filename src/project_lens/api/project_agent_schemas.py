@@ -70,6 +70,42 @@ class ProjectAgentRoleViewResponse(BaseModel):
     project: dict[str, Any] | None = None
 
 
+class ProjectAgentRunDetailRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audience: str = Field(default="team", min_length=1, max_length=50)
+
+
+class ProjectAgentRunDetailResponse(BaseModel):
+    """Run detail replay result — safe, re-checked, and read-only."""
+
+    model_config = ConfigDict(extra="allow")
+
+    ok: bool = True
+    run_id: str | None = None
+    trace_id: str | None = None
+    project: dict[str, Any] | None = None
+    status: str | None = None
+    runtime: str | None = None
+    entry_mode: str | None = None
+    verification_state: str | None = None
+    answer_summary: str | None = None
+    facts: list[dict[str, Any]] = Field(default_factory=list)
+    inferences: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    next_actions: list[dict[str, Any]] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    citation_count: int = 0
+    source_summary: list[str] = Field(default_factory=list)
+    failure_reason: str | None = None
+    audit_ref: dict[str, Any] = Field(default_factory=dict)
+    role_views_available: list[str] = Field(default_factory=list)
+    error_code: str | None = None
+    message: str | None = None
+    retryable: bool | None = None
+    agent_recovery_hint: str | None = None
+
+
 class ProjectAgentToolInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -78,6 +114,7 @@ class ProjectAgentToolInfo(BaseModel):
     category: str = "read"
     parameters: dict[str, Any] = Field(default_factory=dict)
     allow_apply: bool = False
+    requires_approval: bool = False
 
 
 class ProjectAgentToolsResponse(BaseModel):

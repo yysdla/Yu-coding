@@ -1,5 +1,5 @@
-"""Read-only ProjectInvestigationAgent package."""
+"""Agent helpers for citation drafts, ledgers, and Hermes answer assembly."""
 
-from project_lens.agent.investigation import ProjectInvestigationAgent
+from __future__ import annotations
 
-__all__ = ["ProjectInvestigationAgent"]
+__all__: list[str] = []

@@ -99,7 +99,7 @@ def _message_payload(
             "tenant_key": "demo",
         },
         "event": {
-            "sender": {"sender_id": {"user_id": user_id}},
+            "sender": {"sender_id": {"open_id": user_id}},
             "message": {
                 "message_id": f"m-{event_id}",
                 "chat_id": chat_id,
@@ -125,6 +125,7 @@ def _space_with_developer_and_chat_policy(
         services=(project.service,) if project.service else (),
         environments=(project.environment,) if project.environment else (),
         file_allowlist=("src/", "tests/", "knowledge/"),
+        public_sources=("knowledge/",),
         role_policies=(
             ProjectMemberRolePolicy(
                 actor_id="u_dev",
@@ -168,6 +169,8 @@ def _space_with_developer_and_chat_policy(
 
 
 def test_feishu_http_adapter_caches_token_and_posts_card() -> None:
+    from unittest.mock import patch
+
     transport = FakeTransport()
     provider = FeishuTenantTokenProvider(
         app_id="cli_test",
@@ -181,8 +184,11 @@ def test_feishu_http_adapter_caches_token_and_posts_card() -> None:
         transport=transport,
     )
 
-    asyncio.run(messenger.post_card("chat-1", {"header": {"title": "hello"}}))
-    asyncio.run(messenger.post_text("chat-1", "progress"))
+    with patch(
+        "project_lens.integrations.feishu.http_adapter.assert_external_calls_allowed"
+    ):
+        asyncio.run(messenger.post_card("chat-1", {"header": {"title": "hello"}}))
+        asyncio.run(messenger.post_text("chat-1", "progress"))
 
     token_calls = [call for call in transport.calls if "tenant_access_token" in call["url"]]
     message_calls = [call for call in transport.calls if "/im/v1/messages" in call["url"]]
@@ -196,7 +202,6 @@ def test_feishu_http_adapter_caches_token_and_posts_card() -> None:
 def test_feishu_status_exposes_agent_mode_for_grey_release() -> None:
     app = create_app()
     _configure_app(app)
-    app.state.run_service._agent_mode = "read_agent"
     client = TestClient(app)
 
     response = client.get("/api/v1/integrations/feishu/status")
@@ -204,12 +209,18 @@ def test_feishu_status_exposes_agent_mode_for_grey_release() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["outbound_mode"] in {"recording", "http"}
-    assert body["agent_mode"] == "read_agent"
-    assert body["ask_agent_mode"] == "read_agent"
+    assert body["agent_mode"] == "hermes"
+    assert body["ask_agent_mode"] == "hermes"
     assert body["model_provider"]
     assert "model_live" in body
     assert "model_fallback_to_stub" in body
     assert "model_openai_api_key_configured" in body
+    assert "hermes_tool_loop_enabled" in body
+    assert "hermes_bridge_active" in body
+    assert body["hermes_provider"]
+    assert body["hermes_model"]
+    assert "hermes_base_url_configured" in body
+    assert "hermes_api_key_configured" in body
     assert "api_key" not in body
     assert "sk-" not in str(body).lower()
 
@@ -287,7 +298,11 @@ def test_feishu_message_resolves_runtime_context_into_session_and_lifecycle() ->
     assert access["tenant_id"] == "demo"
     assert access["project_id"] == "payment"
     assert access["role"] == "developer"
-    assert access["visibility_level"] == "private"
+    assert access["visibility_level"] == "team_shared"
+    assert access["chat_type"] == "group"
+    assert access["allow_private_details"] is False
+    assert access["policy_version"] == "v1"
+    assert access["identity_source"] == "feishu_event"
     assert access["allowed_tools"] == ["search_context"]
     assert access["readable_sources"] == ["src/"]
     assert "project_space" not in access
@@ -303,6 +318,10 @@ def test_feishu_message_resolves_runtime_context_into_session_and_lifecycle() ->
         "allowed_tools",
         "readable_sources",
         "forbidden_sources",
+        "identity_source",
+        "policy_version",
+        "chat_type",
+        "allow_private_details",
     }
 
     created = [
@@ -315,7 +334,8 @@ def test_feishu_message_resolves_runtime_context_into_session_and_lifecycle() ->
     assert runtime["tenant_id"] == "demo"
     assert runtime["project_id"] == "payment"
     assert runtime["role"] == "developer"
-    assert runtime["visibility_level"] == "private"
+    assert runtime["visibility_level"] == "team_shared"
+    assert runtime["chat_type"] == "group"
     assert runtime["allowed_tools"] == ["search_context"]
     assert created[0].payload["entry_mode"] == "natural_project_question"
 
@@ -346,9 +366,11 @@ def test_feishu_debug_project_slash_is_marked_and_stripped_before_run() -> None:
     assert created[0].payload["entry_mode"] == "debug_slash"
 
 
-def test_feishu_natural_project_question_uses_read_agent_when_enabled() -> None:
+def test_feishu_natural_project_question_never_falls_back_to_read_agent() -> None:
     app = create_app()
     _configure_app(app)
+    # Deliberately corrupt the legacy mode selector. Explicit Hermes runtime
+    # metadata must still own the run and no legacy execute call is available.
     app.state.run_service._agent_mode = "read_agent"
     client = TestClient(app)
 
@@ -363,9 +385,8 @@ def test_feishu_natural_project_question_uses_read_agent_when_enabled() -> None:
     assert response.status_code == 200
     run = app.state.run_service.get(UUID(response.json()["run_id"]))
     assert run is not None
-    assert run.answer is not None
-    assert run.answer.skill == "project_investigation"
-    assert app.state.investigation_agent.last_tool_names
+    assert run.runtime == "hermes"
+    assert run.entry_mode == "natural_project_question"
     created = [
         event
         for event in app.state.lifecycle_bus.of_type(LifecycleEventType.RUN_CREATED)
@@ -374,32 +395,17 @@ def test_feishu_natural_project_question_uses_read_agent_when_enabled() -> None:
     assert created[0].payload["entry_mode"] == "natural_project_question"
 
 
-def test_feishu_natural_project_question_uses_hermes_tool_loop_when_enabled(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        "project_lens.config.settings.feishu_use_hermes_tool_loop",
-        True,
-        raising=False,
-    )
+def test_feishu_natural_project_question_uses_one_real_hermes_run() -> None:
     app = create_app()
     _configure_app(app)
-    app.state.run_service._agent_mode = "workflow"
     client = TestClient(app)
-
-    called = {"count": 0}
-
-    async def _boom(*_args, **_kwargs):
-        called["count"] += 1
-        raise AssertionError("RunService.create should not be called in Hermes tool-loop mode")
-
-    app.state.run_service.create = _boom  # type: ignore[method-assign]
 
     from project_lens.integrations.feishu.hermes_loop_runner import (
         HermesLoopRunResult,
         HermesLoopToolCall,
     )
     from project_lens.integrations.feishu import hermes_tool_loop as hermes_mod
+    from project_lens.domain.models import ProjectAnswer
 
     assert not hasattr(hermes_mod, "_plan")
 
@@ -432,6 +438,13 @@ def test_feishu_natural_project_question_uses_hermes_tool_loop_when_enabled(
                     ),
                 ),
                 ok=True,
+                verified_answer=ProjectAnswer(
+                    project=project,
+                    status="unknown",
+                    business_summary="Evidence is insufficient.",
+                    technical_summary="Evidence is insufficient.",
+                    unknowns=("Need cited evidence.",),
+                ),
             )
 
     bridge = app.state.feishu_event_service._hermes_tool_loop_bridge
@@ -449,8 +462,11 @@ def test_feishu_natural_project_question_uses_hermes_tool_loop_when_enabled(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "accepted"
-    assert "run_id" not in body
-    assert called["count"] == 0
+    assert body["run_id"]
+    run = app.state.run_service.get(UUID(body["run_id"]))
+    assert run is not None
+    assert run.runtime == "hermes"
+    assert run.hermes_loop_id is not None
     assert bridge.last_tool_names == ("projectlens_authorized_evidence",)
     assert "projectlens_search_context" not in bridge.last_tool_names
     assert "projectlens_read_project_file" not in bridge.last_tool_names
@@ -459,9 +475,36 @@ def test_feishu_natural_project_question_uses_hermes_tool_loop_when_enabled(
     assert bridge.last_envelope["evidence_refs"]
     assert bridge.last_envelope["tool_calls"]
     assert bridge.last_envelope["audit_ref"]["allow_apply"] is False
+    assert bridge.last_envelope["audit_ref"]["loop_id"]
+    assert bridge.last_loop_id is not None
+    loop_id = bridge.last_loop_id
+    durable = app.state.event_sink.for_run(run.id)
+    assert durable
+    assert any(event.type.value == "tool_started" for event in durable)
+    events_resp = client.get(f"/api/v1/project-agent/hermes-loops/{run.id}/events")
+    assert events_resp.status_code == 200
+    events_body = events_resp.json()
+    assert events_body["ok"] is True
+    assert events_body["run_id"] == str(run.id)
+    assert events_body["allow_apply"] is False
+    assert events_body["event_count"] >= 2
+    # Session scratchpad should carry the latest hermes_tool_loop pointer.
+    from project_lens.runtime.lifecycle import LifecycleEventType
+
+    found_scratch = False
+    for event in app.state.lifecycle_bus.of_type(LifecycleEventType.SESSION_SAVED):
+        sid = (event.payload or {}).get("session_id")
+        if not sid:
+            continue
+        session = app.state.conversation_store.get(UUID(str(sid)))
+        if session is None:
+            continue
+        entry = (session.task_scratchpad or {}).get("hermes_tool_loop")
+        if isinstance(entry, dict) and entry.get("loop_id") == str(loop_id):
+            found_scratch = True
+            break
+    assert found_scratch
     assert app.state.feishu_messenger.messages[-1].message_type == "interactive"
-    card = app.state.feishu_messenger.messages[-1].content
-    assert card["header"]["title"]["content"] == "ProjectLens Hermes Tool Loop"
 
 def test_feishu_chat_policy_narrows_developer_tools_by_intersection() -> None:
     app = create_app()
@@ -506,10 +549,9 @@ def test_feishu_disallowed_role_in_chat_is_rejected() -> None:
     assert "chat-1" in detail
 
 
-def test_feishu_without_policies_uses_guest_team_shared_defaults() -> None:
+def test_feishu_without_policies_uses_guest_public_sources_only() -> None:
     app = create_app()
     project = _configure_app(app)
-    # Local registration space has no role/chat policies — defaults apply.
     client = TestClient(app)
 
     response = client.post(
@@ -535,12 +577,8 @@ def test_feishu_without_policies_uses_guest_team_shared_defaults() -> None:
     assert access["role"] == "guest"
     assert access["visibility_level"] == "team_shared"
     assert access["answer_depth"] == "brief"
-    assert access["allowed_tools"] == [
-        "search_context",
-        "read_project_file",
-        "query_graph",
-        "list_knowledge_gaps",
-    ]
+    assert access["readable_sources"] == ["knowledge/"]
+    assert access["allowed_tools"] == ["search_context"]
 
 
 def test_feishu_card_ask_question_also_records_runtime_access() -> None:
@@ -560,7 +598,7 @@ def test_feishu_card_ask_question_also_records_runtime_access() -> None:
                 "tenant_key": "demo",
             },
             "event": {
-                "operator": {"user_id": "u_dev"},
+                "operator": {"open_id": "u_dev"},
                 "action": {
                     "tag": "button",
                     "value": {

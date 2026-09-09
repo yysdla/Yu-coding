@@ -10,14 +10,18 @@ from project_lens.application.answer_envelope import (
     project_answer_to_envelope,
     recoverable_error,
 )
+from project_lens.application.audience_views import (
+    render_audience_markdown,
+    render_audience_view,
+)
 from project_lens.application.role_views import (
     SUPPORTED_AUDIENCES,
     is_supported_audience,
     normalize_audience,
-    render_role_view_markdown,
 )
 from project_lens.application.run_service import RunService
 from project_lens.domain.models import RunStatus
+from project_lens.project_space.policies import effective_scope_from_audit_dict
 
 
 @dataclass(frozen=True)
@@ -101,13 +105,36 @@ class ProjectAgentRoleViewService:
             audience=audience,
             format="concise",
         )
-        markdown = render_role_view_markdown(envelope, audience=audience)
+        if run.runtime_access is None or not run.channel_id:
+            return recoverable_error(
+                error_code="ACCESS_SCOPE_MISSING",
+                message="run has no effective access scope for audience replay",
+                retryable=False,
+                agent_recovery_hint="Ask the project question again with a trusted identity.",
+                project=run.project,
+                extras={"run_id": str(run.id), "http_status": 409},
+            )
+        scope = effective_scope_from_audit_dict(
+            run.runtime_access,
+            project=run.project,
+            actor_id=run.user_id,
+            chat_id=run.channel_id,
+        )
+        view = render_audience_view(
+            run.answer,
+            role=scope.role,
+            chat_type=scope.chat_type,
+            scope=scope,
+            audience=None if audience == "team" else audience,
+        )
+        markdown = render_audience_markdown(view)
         return {
             "ok": True,
             "audience": audience,
             "run_id": str(run.id),
             "trace_id": str(run.trace_id),
             "markdown": markdown,
+            "audience_view": view.to_dict(),
             "envelope_ref": {
                 "answer_summary": envelope.get("answer_summary"),
                 "fact_count": len(envelope.get("facts") or []),

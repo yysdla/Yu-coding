@@ -218,11 +218,11 @@ def test_feishu_gap_card_shows_target_and_suggested_owner() -> None:
     assert "来源摘要" in card_text or "当前资料不足" in card_text
 
 
-def test_specialist_gap_lines_include_signal_and_evidence() -> None:
-    from project_lens.workflow.analysis import AnalysisAgent
-    from project_lens.context.models import AccessContext, ContextQuery
-    from tests.context_helpers import ACCESS_SCOPE, build_demo_engine
+def test_knowledge_gaps_include_signal_coverage_and_evidence() -> None:
     from pathlib import Path
+
+    from project_lens.context.models import AccessContext
+    from tests.context_helpers import ACCESS_SCOPE, build_demo_engine
 
     engine, _index, project = build_demo_engine(
         Path(__file__).parents[1] / "examples" / "payment_service",
@@ -234,29 +234,5 @@ def test_specialist_gap_lines_include_signal_and_evidence() -> None:
         permissions=frozenset({ACCESS_SCOPE}),
     )
     gaps = engine.knowledge_gaps(project, access)
-    authorized = engine.authorized_evidence(project, access, limit=50)
-    from project_lens.context.models import EvidenceBundle, RetrievalHit
-
-    hits = tuple(
-        RetrievalHit(
-            evidence=item,
-            score=1.0,
-            channels=("authorized",),
-            channel_ranks={"authorized": index + 1},
-        )
-        for index, item in enumerate(authorized)
-    )
-    bundle = EvidenceBundle(
-        query=ContextQuery(text="知识库缺什么", project=project, limit=50),
-        hits=hits,
-    )
-    result = AnalysisAgent().analyze(
-        "知识库缺什么",
-        bundle,
-        knowledge_gaps=gaps,
-    )
-    assert any("为何判断：" in item for item in result.unknowns)
-    assert any("证据：" in item for item in result.unknowns)
     assert any(gap.evidence_ids for gap in gaps.gaps)
     assert gaps.signal_coverage
-    assert any("主题覆盖：" in claim.text for claim in result.candidates)

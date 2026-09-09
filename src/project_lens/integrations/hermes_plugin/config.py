@@ -17,6 +17,7 @@ class ProjectLensPluginConfig:
     timeout_seconds: float = 30.0
     feishu_bindings: dict[str, dict[str, str]] = field(default_factory=dict)
     feishu_cards_enabled: bool = False
+    advanced_tools_enabled: bool = False
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     feishu_base_url: str = "https://open.feishu.cn"
@@ -42,6 +43,7 @@ class ProjectLensPluginConfig:
             timeout_seconds=timeout,
             feishu_bindings=_bindings_from_env(),
             feishu_cards_enabled=_env_flag("PROJECTLENS_FEISHU_CARDS"),
+            advanced_tools_enabled=_env_flag("PROJECTLENS_HERMES_ADVANCED_TOOLS"),
             feishu_app_id=os.getenv("FEISHU_APP_ID", "").strip(),
             feishu_app_secret=os.getenv("FEISHU_APP_SECRET", "").strip(),
             feishu_base_url=os.getenv("FEISHU_BASE_URL", cls.feishu_base_url).rstrip("/"),

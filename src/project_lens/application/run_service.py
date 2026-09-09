@@ -5,24 +5,19 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from project_lens.agent.investigation import ProjectInvestigationAgent
 from project_lens.config import settings
-from project_lens.domain.conversation import ConversationSession
-from project_lens.domain.memory import ProjectMemory
+from project_lens.context.history_store import HistoryMemoryStore
 from project_lens.domain.models import AgentRun, ProjectAnswer, ProjectRef, RunStatus, utc_now
 from project_lens.runtime.events import AgentEvent, AgentEventType, EventSink, InMemoryEventSink
 from project_lens.runtime.lifecycle import LifecycleBus, LifecycleEventType
-from project_lens.workflow.orchestrator import ProjectWorkflow
-from project_lens.workflow.task_scratchpad import (
-    compress_events_to_scratchpad,
-    scratchpad_to_session_dict,
-)
 
 
 class RunRepository(Protocol):
     def add(self, run: AgentRun) -> None: ...
 
     def get(self, run_id: UUID) -> AgentRun | None: ...
+
+    def list_recent(self, project: ProjectRef, *, limit: int = 100) -> tuple[AgentRun, ...]: ...
 
 
 class EventQuerySink(EventSink, Protocol):
@@ -40,24 +35,37 @@ class InMemoryRunRepository:
         run = self._runs.get(run_id)
         return run.model_copy(deep=True) if run else None
 
+    def list_recent(self, project: ProjectRef, *, limit: int = 100) -> tuple[AgentRun, ...]:
+        runs = [
+            run for run in self._runs.values()
+            if run.project.tenant_id == project.tenant_id
+            and run.project.project_id == project.project_id
+        ]
+        runs.sort(key=lambda item: item.updated_at, reverse=True)
+        return tuple(run.model_copy(deep=True) for run in runs[: max(1, int(limit))])
+
 
 class RunService:
+    """Hermes-only run lifecycle. Legacy workflow / read_agent execute paths are removed."""
+
     def __init__(
         self,
         repository: RunRepository,
-        workflow: ProjectWorkflow | None = None,
         event_sink: EventQuerySink | None = None,
         lifecycle: LifecycleBus | None = None,
         *,
-        investigation_agent: ProjectInvestigationAgent | None = None,
         agent_mode: str | None = None,
+        history_store: HistoryMemoryStore | None = None,
     ) -> None:
         self._repository = repository
-        self._workflow = workflow
-        self._investigation = investigation_agent
-        self._agent_mode = (agent_mode or settings.agent_mode or "workflow").strip().lower()
+        self._agent_mode = (agent_mode or settings.agent_mode or "hermes").strip().lower()
+        if self._agent_mode in {"workflow", "read_agent"}:
+            raise ValueError(
+                f"agent_mode={self._agent_mode!r} is retired; use hermes"
+            )
         self._events = event_sink or InMemoryEventSink()
         self._lifecycle = lifecycle or LifecycleBus(event_sink=self._events)
+        self._history_store = history_store
 
     @property
     def lifecycle(self) -> LifecycleBus:
@@ -76,12 +84,22 @@ class RunService:
         channel_id: str | None = None,
         runtime_access: dict[str, object] | None = None,
         entry_mode: str | None = None,
+        runtime: str | None = None,
+        hermes_loop_id: UUID | None = None,
+        context_snapshot_id: UUID | None = None,
+        context_hash: str | None = None,
     ) -> AgentRun:
         run = AgentRun(
             project=project,
             user_id=user_id,
             channel_id=channel_id,
             question=question,
+            runtime_access=runtime_access,
+            runtime=(runtime or self._agent_mode),
+            entry_mode=entry_mode,
+            hermes_loop_id=hermes_loop_id,
+            context_snapshot_id=context_snapshot_id,
+            context_hash=context_hash,
         )
         self._repository.add(run)
         payload: dict[str, object] = {
@@ -89,11 +107,18 @@ class RunService:
             "channel_id": channel_id,
             "question_preview": question[:200],
             "agent_mode": self._agent_mode,
+            "runtime": run.runtime,
         }
         if runtime_access is not None:
             payload["runtime_access"] = runtime_access
         if entry_mode is not None:
             payload["entry_mode"] = entry_mode
+        if hermes_loop_id is not None:
+            payload["hermes_loop_id"] = str(hermes_loop_id)
+        if context_snapshot_id is not None:
+            payload["context_snapshot_id"] = str(context_snapshot_id)
+        if context_hash is not None:
+            payload["context_hash"] = context_hash
         self._lifecycle.emit(
             LifecycleEventType.RUN_CREATED,
             run_id=run.id,
@@ -101,6 +126,7 @@ class RunService:
             project=project,
             payload=payload,
         )
+        self._persist_history(run)
         return run
 
     def get(self, run_id: UUID) -> AgentRun | None:
@@ -109,104 +135,82 @@ class RunService:
     def events(self, run_id: UUID) -> tuple[AgentEvent, ...]:
         return self._events.for_run(run_id)
 
-    async def execute(
+    async def complete_external(
         self,
         run_id: UUID,
         *,
-        session: ConversationSession | None = None,
-        memories: tuple[ProjectMemory, ...] = (),
+        answer: ProjectAnswer | None,
+        error: str | None = None,
+        agent_mode: str = "hermes",
+        hermes_loop_id: UUID | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> AgentRun | None:
+        """Persist a result produced by an external Agent runtime such as Hermes."""
         run = self._repository.get(run_id)
         if run is None:
             return None
-        use_read_agent = self._agent_mode == "read_agent" and self._investigation is not None
-        if not use_read_agent and self._workflow is None:
-            raise RuntimeError("run workflow is not configured")
-        if run.status not in {RunStatus.ACCEPTED, RunStatus.FAILED}:
-            raise ValueError(f"run cannot be executed from status {run.status}")
-
-        async def transition(status: RunStatus, payload: dict[str, object]) -> None:
-            nonlocal run
-            run = run.model_copy(update={"status": status, "updated_at": utc_now()})
-            self._repository.add(run)
-            await self._events.emit(
-                AgentEvent(
-                    run_id=run.id,
-                    trace_id=run.trace_id,
-                    type=AgentEventType.RUN_STATUS_CHANGED,
-                    payload={"status": status.value, **payload},
-                )
-            )
-
-        try:
-            if use_read_agent:
-                assert self._investigation is not None
-                answer = await self._investigation.execute(
-                    run,
-                    transition,
-                    session=session,
-                    memories=memories,
-                )
-            else:
-                assert self._workflow is not None
-                answer = await self._workflow.execute(
-                    run,
-                    transition,
-                    session=session,
-                    memories=memories,
-                )
-            run = self._complete(run, answer)
-            prior = None
-            if self._workflow is not None and self._workflow.last_context_pack is not None:
-                prior = self._workflow.last_context_pack.task_state
-            task_state = compress_events_to_scratchpad(
-                self._events.for_run(run.id),
-                prior=prior,
-                answer=answer,
-            )
-            if task_state is not None and self._workflow is not None:
-                self._workflow.set_last_task_state(task_state)
-            await self._events.emit(
-                AgentEvent(
-                    run_id=run.id,
-                    trace_id=run.trace_id,
-                    type=AgentEventType.RUN_COMPLETED,
-                    payload={
-                        "status": run.status.value,
-                        "claim_count": len(answer.claims),
-                        "evidence_count": len(answer.evidence),
-                        "agent_mode": self._agent_mode,
-                        "task_scratchpad": scratchpad_to_session_dict(task_state),
-                    },
-                )
-            )
-        except Exception as exc:
-            run = run.model_copy(
+        update: dict[str, object] = {"updated_at": utc_now()}
+        if hermes_loop_id is not None:
+            update["hermes_loop_id"] = hermes_loop_id
+        if answer is not None and error is None:
+            completed = run.model_copy(
                 update={
-                    "status": RunStatus.FAILED,
-                    "error": str(exc),
-                    "updated_at": utc_now(),
+                    **update,
+                    "status": RunStatus.COMPLETED,
+                    "answer": answer,
+                    "error": None,
                 }
             )
-            self._repository.add(run)
-            await self._events.emit(
-                AgentEvent(
-                    run_id=run.id,
-                    trace_id=run.trace_id,
-                    type=AgentEventType.RUN_FAILED,
-                    payload={"status": run.status.value, "error": str(exc)},
-                )
+        else:
+            completed = run.model_copy(
+                update={
+                    **update,
+                    "status": RunStatus.FAILED,
+                    "answer": None,
+                    "error": error or "external agent failed",
+                }
             )
-        return run
-
-    def _complete(self, run: AgentRun, answer: ProjectAnswer) -> AgentRun:
-        completed = run.model_copy(
-            update={
-                "status": RunStatus.COMPLETED,
-                "answer": answer,
-                "error": None,
-                "updated_at": utc_now(),
-            }
-        )
         self._repository.add(completed)
+        payload: dict[str, object] = {
+            "status": completed.status.value,
+            "agent_mode": agent_mode,
+            "runtime": completed.runtime,
+            "claim_count": len(answer.claims) if answer is not None else 0,
+            "evidence_count": len(answer.evidence) if answer is not None else 0,
+        }
+        if metadata:
+            payload.update(metadata)
+        await self._events.emit(
+            AgentEvent(
+                run_id=completed.id,
+                trace_id=completed.trace_id,
+                type=(
+                    AgentEventType.RUN_COMPLETED
+                    if completed.status == RunStatus.COMPLETED
+                    else AgentEventType.RUN_FAILED
+                ),
+                payload=(
+                    payload
+                    if completed.status == RunStatus.COMPLETED
+                    else {**payload, "error": completed.error}
+                ),
+            )
+        )
+        self._persist_history(completed)
         return completed
+
+    async def execute(self, run_id: UUID, **_: object) -> AgentRun | None:
+        """Legacy entrypoint. Hermes runs must use HermesRuntimeService."""
+        run = self._repository.get(run_id)
+        if run is None:
+            return None
+        raise RuntimeError(
+            "Hermes runs must be executed through HermesRuntimeService "
+            "(legacy workflow / read_agent execute paths are removed)"
+        )
+
+    def _persist_history(self, run: AgentRun) -> None:
+        if self._history_store is None:
+            return
+        events = self._events.for_run(run.id) if hasattr(self._events, "for_run") else ()
+        self._history_store.upsert_run(run, events)

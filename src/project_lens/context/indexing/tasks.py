@@ -66,6 +66,16 @@ class TaskIndexer:
                 "assignee": normalized.assignee,
                 "related_incident_id": normalized.related_incident_id,
                 "related_commit_sha": normalized.related_commit_sha,
+                "related_pr_id": normalized.related_pr_id,
+                "branch": normalized.branch,
+                "start_at": normalized.start_at.isoformat() if normalized.start_at else None,
+                "due_at": normalized.due_at.isoformat() if normalized.due_at else None,
+                "owner_ids": list(normalized.owner_ids),
+                "dependency_ids": list(normalized.dependency_ids),
+                "dependency_status": normalized.dependency_status,
+                "requirement_id": normalized.requirement_id,
+                "acceptance_criteria": list(normalized.acceptance_criteria),
+                "requires_code": normalized.requires_code,
             }
             evidence.append(
                 Evidence(
@@ -157,6 +167,16 @@ def _task_content(record: TaskRecord) -> str:
         parts.append(f"related_incident: {record.related_incident_id}")
     if record.related_commit_sha:
         parts.append(f"related_commit: {record.related_commit_sha}")
+    if record.related_pr_id:
+        parts.append(f"related_pr: {record.related_pr_id}")
+    if record.branch:
+        parts.append(f"branch: {record.branch}")
+    if record.due_at:
+        parts.append(f"due_at: {record.due_at.isoformat()}")
+    if record.dependency_ids:
+        parts.append(f"dependencies: {', '.join(record.dependency_ids)}")
+    if record.acceptance_criteria:
+        parts.append(f"acceptance_criteria: {'; '.join(record.acceptance_criteria)}")
     return "\n".join(parts)
 
 

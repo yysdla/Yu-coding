@@ -21,6 +21,8 @@ from project_lens.context.indexing import (
 from project_lens.context.ops.query import OpsQueryService
 from project_lens.context.ops.store import InMemoryOpsSignalStore, load_ops_signals_file
 from project_lens.context.store import InMemoryEvidenceIndex
+from project_lens.context.source_store import SourceRecordStore
+from project_lens.application.risk_engine import RiskEngine
 from project_lens.domain.models import Evidence, ProjectRef
 from project_lens.workflow.models import ProjectRegistration
 
@@ -54,6 +56,7 @@ def build_local_context_engine(
     *,
     project: ProjectRef,
     access_scope: str,
+    source_store: SourceRecordStore | None = None,
 ) -> tuple[ContextEngine, InMemoryEvidenceIndex]:
     return build_registered_context_engine(
         (
@@ -62,12 +65,16 @@ def build_local_context_engine(
                 sources=sources,
                 access_scope=access_scope,
             ),
-        )
+        ),
+        source_store=source_store,
     )
 
 
 def build_registered_context_engine(
     registrations: tuple[LocalProjectRegistration, ...],
+    *,
+    risk_engine: RiskEngine | None = None,
+    source_store: SourceRecordStore | None = None,
 ) -> tuple[ContextEngine, InMemoryEvidenceIndex]:
     _validate_registrations(registrations)
     index = InMemoryEvidenceIndex()
@@ -144,7 +151,12 @@ def build_registered_context_engine(
             )
         if sources.ops_signals_file is not None:
             ops_store.add_many(load_ops_signals_file(sources.ops_signals_file))
-    return ContextEngine(index, ops_service=OpsQueryService(ops_store)), index
+    return ContextEngine(
+        index,
+        ops_service=OpsQueryService(ops_store),
+        risk_engine=risk_engine,
+        source_store=source_store,
+    ), index
 
 
 def _index_git_changes(

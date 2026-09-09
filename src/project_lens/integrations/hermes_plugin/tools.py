@@ -18,9 +18,27 @@ from project_lens.integrations.hermes_plugin.config import ProjectLensPluginConf
 FORMAL_TOOL_NAMES: tuple[str, ...] = (
     "projectlens_search_context",
     "projectlens_read_project_file",
+    "projectlens_list_project_files",
     "projectlens_query_graph",
     "projectlens_authorized_evidence",
     "projectlens_list_knowledge_gaps",
+)
+MEMORY_TOOL_NAMES: tuple[str, ...] = (
+    "projectlens_search_project_memory",
+    "projectlens_get_memory_detail",
+)
+HISTORY_TOOL_NAMES: tuple[str, ...] = (
+    "projectlens_search_project_history",
+    "projectlens_get_run_detail",
+)
+ADVANCED_TOOL_NAMES: tuple[str, ...] = (
+    "projectlens_propose_patch_plan",
+    "projectlens_propose_test_plan",
+    "projectlens_propose_risk_escalation",
+    "projectlens_propose_project_todo",
+    "projectlens_validate_patch_plan",
+    "projectlens_check_diff_scope",
+    "projectlens_verify_evidence_links",
 )
 
 TOOLSET_NAME = "projectlens"
@@ -36,6 +54,40 @@ _CONTEXT_PARAM_PROPERTIES: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
+    "projectlens_search_project_memory": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Memory search text"},
+            "memory_types": {"type": "array", "items": {"type": "string"}, "description": "Optional memory type filter"},
+            "service": {"type": "string", "description": "Optional project service filter"},
+            "limit": {"type": "integer", "description": "1-8 cards; server capped"},
+        },
+        "required": ["query"],
+    },
+    "projectlens_get_memory_detail": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "description": "Exact memory id returned by projectlens_search_project_memory"},
+        },
+        "required": ["memory_id"],
+    },
+    "projectlens_search_project_history": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Historical run search text"},
+            "from": {"type": "string", "description": "Optional ISO date lower bound"},
+            "to": {"type": "string", "description": "Optional ISO date upper bound"},
+            "limit": {"type": "integer", "description": "1-8 historical summaries; server capped"},
+        },
+        "required": ["query"],
+    },
+    "projectlens_get_run_detail": {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string", "description": "Exact run id returned by project history search"},
+        },
+        "required": ["run_id"],
+    },
     "projectlens_search_context": {
         "type": "object",
         "properties": {
@@ -50,6 +102,14 @@ _DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
             "path": {"type": "string", "description": "Project-relative allowlisted path"},
         },
         "required": ["path"],
+    },
+    "projectlens_list_project_files": {
+        "type": "object",
+        "properties": {
+            "prefix": {"type": "string", "description": "Allowlisted path prefix, e.g. docs/"},
+            "limit": {"type": "integer", "description": "Maximum file names"},
+        },
+        "required": [],
     },
     "projectlens_query_graph": {
         "type": "object",
@@ -72,6 +132,11 @@ _DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
         "required": [],
     },
 }
+_ADVANCED_PARAMETERS: dict[str, dict[str, Any]] = {
+    "projectlens_propose_project_todo": {"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"}, "owner_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "description"]},
+    "projectlens_check_diff_scope": {"type": "object", "properties": {"title": {"type": "string"}, "rationale": {"type": "string"}, "patches": {"type": "array", "items": {"type": "object"}}}, "required": ["title", "rationale", "patches"]},
+    "projectlens_verify_evidence_links": {"type": "object", "properties": {"evidence_ids": {"type": "array", "items": {"type": "string"}}, "citation_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["evidence_ids", "citation_ids"]},
+}
 
 # Fallback catalog when GET /project-agent/tools is unavailable at register time.
 # Names must stay identical to ProjectAgentToolService.list_tools().
@@ -85,6 +150,7 @@ _FALLBACK_TOOL_SPECS: tuple[dict[str, Any], ...] = tuple(
         ),
         "category": "read",
         "allow_apply": False,
+        "requires_approval": False,
         "parameters": _DEFAULT_PARAMETERS[name],
     }
     for name in FORMAL_TOOL_NAMES
@@ -115,14 +181,29 @@ def resolve_tool_catalog(client: ProjectLensApiClient) -> list[dict[str, Any]]:
     envelope = client.list_tools()
     tools = envelope.get("tools") if isinstance(envelope, dict) else None
     if envelope.get("ok") is True and isinstance(tools, list) and tools:
+        allowed_names = set(FORMAL_TOOL_NAMES) | set(MEMORY_TOOL_NAMES) | set(HISTORY_TOOL_NAMES)
+        client_config = getattr(client, "config", None)
+        if getattr(client_config, "advanced_tools_enabled", False):
+            allowed_names.update(ADVANCED_TOOL_NAMES)
         formal = [
             item
             for item in tools
-            if isinstance(item, dict) and item.get("name") in FORMAL_TOOL_NAMES
+            if isinstance(item, dict) and item.get("name") in allowed_names
         ]
-        if {item["name"] for item in formal} == set(FORMAL_TOOL_NAMES):
+        if {item["name"] for item in formal}.issuperset(FORMAL_TOOL_NAMES):
             return formal
-    return [dict(item) for item in _FALLBACK_TOOL_SPECS]
+    fallback = [dict(item) for item in _FALLBACK_TOOL_SPECS]
+    client_config = getattr(client, "config", None)
+    if getattr(client_config, "advanced_tools_enabled", False):
+        fallback.extend({
+            "name": name,
+            "description": f"Approval-gated Hermes draft/report tool: {name}.",
+            "category": "validate" if "validate" in name else "propose",
+            "allow_apply": False,
+            "requires_approval": "validate" not in name,
+            "parameters": _ADVANCED_PARAMETERS[name],
+        } for name in ADVANCED_TOOL_NAMES)
+    return fallback
 
 
 def build_openai_tool_schema(spec: dict[str, Any]) -> dict[str, Any]:
@@ -132,7 +213,11 @@ def build_openai_tool_schema(spec: dict[str, Any]) -> dict[str, Any]:
     description = str(spec.get("description") or name)
     raw_params = spec.get("parameters") if isinstance(spec.get("parameters"), dict) else {}
     if not raw_params.get("properties"):
-        raw_params = _DEFAULT_PARAMETERS.get(name, {"type": "object", "properties": {}, "required": []})
+        raw_params = (
+            _DEFAULT_PARAMETERS.get(name)
+            or _ADVANCED_PARAMETERS.get(name)
+            or {"type": "object", "properties": {}, "required": []}
+        )
     properties = dict(raw_params.get("properties") or {})
     properties.update(_CONTEXT_PARAM_PROPERTIES)
     required = list(raw_params.get("required") or [])

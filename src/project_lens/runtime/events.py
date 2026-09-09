@@ -20,6 +20,10 @@ class AgentEventType(StrEnum):
     LIFECYCLE = "lifecycle"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+    RISK_DETECTED = "risk_detected"
+    RISK_UPDATED = "risk_updated"
+    RISK_SEVERITY_CHANGED = "risk_severity_changed"
+    RISK_RESOLVED = "risk_resolved"
 
 
 @dataclass(frozen=True)

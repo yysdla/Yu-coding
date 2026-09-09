@@ -153,9 +153,9 @@ def build_feishu_audit_summary(
         model_name = _model_name_from_notes(adapter_refs.get("notes"))
 
     agent_mode = _safe_scalar(
-        analyzing.get("agent_mode")
+        run.runtime
+        or analyzing.get("agent_mode")
         or _lifecycle_field(events, "agent_mode")
-        or ("read_agent" if answer.skill == "project_investigation" else "workflow")
     )
     read_tool_names = _format_tool_names(
         analyzing.get("tool_names"),

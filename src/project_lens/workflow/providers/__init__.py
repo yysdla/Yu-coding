@@ -1,4 +1,4 @@
-"""Pluggable ContextPrompt ModelProviders for ProjectWorkflow."""
+"""Pluggable ContextPrompt ModelProviders."""
 
 from project_lens.workflow.providers.base import (
     ModelProvider,

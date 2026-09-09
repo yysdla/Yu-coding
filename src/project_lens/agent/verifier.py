@@ -9,6 +9,7 @@ from project_lens.domain.models import (
     Claim,
     ClaimType,
     EvidenceGrade,
+    EvidenceRef,
     ProjectAnswer,
     ProjectRef,
 )
@@ -75,13 +76,46 @@ def verify_answer_draft(
             business = "调查完成，暂无结论。"
 
     technical = draft.technical_summary.strip() or (
-        f"read_agent tools={list(draft.tools_used)}; "
+        f"hermes tools={list(draft.tools_used)}; "
         f"evidence={len(evidence)}; facts={sum(1 for c in claims if c.type == ClaimType.FACT)}"
     )
 
     # Keep only evidence referenced by claims (plus a small buffer of tool evidence).
     used_ids = {eid for claim in claims for eid in claim.evidence_ids}
     kept = tuple(item for item in evidence if item.id in used_ids) or evidence[:6]
+    facts = tuple(item for item in claims if item.type == ClaimType.FACT)
+    inferences = tuple(item for item in claims if item.type == ClaimType.INFERENCE)
+    citations = tuple(
+        EvidenceRef(
+            id=item.id,
+            kind=item.type,
+            source_uri=f"{item.source.system}:{item.source.source_id}",
+            summary=str(
+                item.metadata.get("title")
+                or item.metadata.get("path")
+                or item.metadata.get("file")
+                or item.source.source_id
+            )[:300],
+        )
+        for item in kept
+        if item.id in used_ids
+    )
+    conclusion = facts[0].text if facts else (
+        "当前资料不足以形成带引用结论。"
+        if unknowns
+        else "调查完成，暂无已验证事实。"
+    )
+    impact_markers = ("影响", "风险", "用户", "业务", "范围", "impact", "risk")
+    impact = tuple(
+        item.text
+        for item in facts
+        if any(marker in item.text.casefold() for marker in impact_markers)
+    )[:8]
+    if not impact:
+        impact = tuple(item.text for item in facts[:3])
+    next_actions = tuple(
+        dict.fromkeys(item.strip() for item in draft.next_actions if item.strip())
+    )[:5]
 
     return ProjectAnswer(
         project=project,
@@ -90,8 +124,15 @@ def verify_answer_draft(
         confidence=0.7 if any(c.type == ClaimType.FACT for c in claims) else 0.25,
         business_summary=business,
         technical_summary=technical,
+        conclusion=conclusion,
         claims=tuple(claims),
+        facts=facts,
+        inferences=inferences,
         evidence=kept,
+        impact=impact,
+        next_actions=next_actions,
+        citations=citations,
+        policy_used="verified-ledger-v1",
         recommended_actions=actions,
         unknowns=tuple(dict.fromkeys(unknowns))[:8],
     )

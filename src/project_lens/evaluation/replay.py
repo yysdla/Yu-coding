@@ -1,4 +1,8 @@
-"""Incident replay helpers for end-to-end workflow evaluation."""
+"""Legacy incident replay helpers.
+
+``RunService.execute`` is Hermes-only and raises; prefer HermesRuntimeService
+or unit-level answer_metrics checks for evaluation.
+"""
 
 from __future__ import annotations
 

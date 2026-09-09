@@ -1,4 +1,4 @@
-"""ContextPrompt-only ModelProvider contracts for ProjectWorkflow.
+"""ContextPrompt-only ModelProvider contracts.
 
 Distinct from runtime.types.ModelProvider (AgentLoop chat/tools).
 Harness providers never accept raw Feishu text or EvidenceIndex access.

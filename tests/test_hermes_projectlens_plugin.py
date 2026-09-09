@@ -321,9 +321,10 @@ def test_register_registers_expected_commands_only(monkeypatch) -> None:
         "project-role",
         "card",
     }
-    # FakeContext supports register_tool; formal tools are registered.
+    # FakeContext supports register_tool; formal tools are registered (plus
+    # optional memory/history tools from the client catalog).
     tool_names = {args[0] for args, _kwargs in ctx.tools}
-    assert tool_names == set(FORMAL_TOOL_NAMES)
+    assert set(FORMAL_TOOL_NAMES).issubset(tool_names)
     assert ctx.skills == []
     assert "DEBUG" in ctx.commands["project"]["description"] or "SMOKE" in ctx.commands[
         "project"
@@ -436,7 +437,7 @@ def test_register_projectlens_tools_uses_hermes_kwargs_api() -> None:
 
     names = register_projectlens_tools(ctx, client=client, config=config)
     assert set(names) == set(FORMAL_TOOL_NAMES)
-    assert len(ctx.tools) == 5
+    assert len(ctx.tools) == len(FORMAL_TOOL_NAMES)
     assert {item["toolset"] for item in ctx.tools} == {TOOLSET_NAME}
     search = next(item for item in ctx.tools if item["name"] == "projectlens_search_context")
     assert search["schema"]["name"] == "projectlens_search_context"

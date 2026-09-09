@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
+from project_lens.application.risk_engine import RiskEngine, RiskScanResult
+from project_lens.application.risk_store import InMemoryRiskStore
 from project_lens.context.access import EvidenceAccessPolicy
 from project_lens.context.change_impact import build_change_impact
 from project_lens.context.graph_service import ContextGraphService
@@ -14,6 +18,9 @@ from project_lens.context.retrieval.exact import ExactCodeRetriever, parse_trace
 from project_lens.context.retrieval.fusion import ReciprocalRankFusion
 from project_lens.context.snapshot import build_project_snapshot
 from project_lens.context.store import EvidenceIndex
+from project_lens.context.authority import AuthorityResolution, SourceGap, detect_gaps, resolve_fact
+from project_lens.context.source_records import FactType, SourceRecord
+from project_lens.context.source_store import SourceRecordStore
 from project_lens.context.timeline import build_timeline_events
 from project_lens.domain.models import (
     ChangeImpact,
@@ -40,6 +47,8 @@ class ContextEngine:
         fusion: ReciprocalRankFusion | None = None,
         graph_service: ContextGraphService | None = None,
         ops_service: OpsQueryService | None = None,
+        risk_engine: RiskEngine | None = None,
+        source_store: SourceRecordStore | None = None,
     ) -> None:
         self._index = index
         self._access = access_policy or EvidenceAccessPolicy()
@@ -48,6 +57,8 @@ class ContextEngine:
         self._fusion = fusion or ReciprocalRankFusion()
         self._graph = graph_service or ContextGraphService()
         self._ops = ops_service or OpsQueryService()
+        self._risks = risk_engine or RiskEngine(InMemoryRiskStore())
+        self._source_store = source_store
 
     def search(self, query: ContextQuery, access: AccessContext) -> EvidenceBundle:
         all_evidence = self._index.all()
@@ -144,6 +155,19 @@ class ContextEngine:
         )
         return self._access.filter(self._index.all(), query, access)[: query.limit]
 
+    def scan_risks(
+        self,
+        project: ProjectRef,
+        access: AccessContext,
+        *,
+        now: datetime | None = None,
+    ) -> RiskScanResult:
+        """Run deterministic rules only after project and ACL filtering."""
+
+        query = ContextQuery(text="authorized project risk scan", project=project, limit=50)
+        authorized = self._access.filter(self._index.all(), query, access)
+        return self._risks.scan(project, authorized, now=now, complete_snapshot=False)
+
     def knowledge_gaps(self, project: ProjectRef, access: AccessContext) -> KnowledgeGapReport:
         candidates = self.authorized_evidence(project, access, limit=50)
         snapshot = build_project_snapshot(candidates, project=project)
@@ -154,6 +178,48 @@ class ContextEngine:
             snapshot=snapshot,
             graph=graph,
         )
+
+    def resolve_fact(
+        self,
+        project: ProjectRef,
+        access: AccessContext,
+        fact_type: FactType,
+        *,
+        now: datetime | None = None,
+    ) -> AuthorityResolution:
+        """Select a source after the same project and ACL filtering used by search."""
+        query = ContextQuery(text=fact_type.value, project=project, limit=50)
+        records = self._authorized_source_records(query, access)
+        return resolve_fact(records, fact_type, now=now)
+
+    def source_gaps(
+        self,
+        project: ProjectRef,
+        access: AccessContext,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[SourceGap, ...]:
+        """Detect missing, conflicting, stale, and unconfirmed facts within ACL."""
+        query = ContextQuery(text="source gaps", project=project, limit=50)
+        records = self._authorized_source_records(query, access)
+        return detect_gaps(records, project_id=project.project_id, now=now)
+
+    def _authorized_source_records(
+        self,
+        query: ContextQuery,
+        access: AccessContext,
+    ) -> tuple[SourceRecord, ...]:
+        evidence = self._access.filter(self._index.all(), query, access)
+        records = [SourceRecord.from_evidence(item) for item in evidence]
+        if self._source_store is not None:
+            for item in self._source_store.all(
+                tenant_id=query.project.tenant_id,
+                project_id=query.project.project_id,
+            ):
+                if item.access_scope in access.permissions:
+                    records.append(item)
+        deduplicated = {item.key: item for item in records}
+        return tuple(deduplicated.values())
 
     def query_graph(
         self,

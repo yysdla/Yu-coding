@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from project_lens.domain.identity import ActorContext, ChatType
 from project_lens.domain.models import ProjectRef
 
 
@@ -15,15 +16,61 @@ class FeishuRunContext:
     project: ProjectRef
     user_id: str
     channel_id: str
+    actor: ActorContext
+
+    @property
+    def tenant_key(self) -> str:
+        return self.actor.tenant_key
+
+    @property
+    def chat_type(self) -> ChatType:
+        return self.actor.chat_type
+
+
+def build_feishu_actor_context(
+    *,
+    tenant_key: str,
+    actor_id: str,
+    chat_id: str,
+    chat_type: ChatType,
+) -> ActorContext:
+    return ActorContext(
+        tenant_key=tenant_key,
+        actor_id=actor_id,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        source="feishu_event",
+        authenticated=True,
+    )
 
 
 class StaticFeishuIdentityMapper:
     def __init__(self, default_project: ProjectRef) -> None:
         self._default_project = default_project
 
-    def resolve(self, *, tenant_key: str, chat_id: str, user_id: str) -> FeishuRunContext:
-        project = self._default_project.model_copy(update={"tenant_id": tenant_key or "demo"})
-        return FeishuRunContext(project=project, user_id=user_id, channel_id=chat_id)
+    def resolve(
+        self,
+        *,
+        tenant_key: str,
+        chat_id: str,
+        user_id: str,
+        chat_type: ChatType = "group",
+    ) -> FeishuRunContext:
+        if not tenant_key.strip():
+            raise PermissionError("missing Feishu tenant_key")
+        project = self._default_project.model_copy(update={"tenant_id": tenant_key})
+        actor = build_feishu_actor_context(
+            tenant_key=tenant_key,
+            actor_id=user_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+        )
+        return FeishuRunContext(
+            project=project,
+            user_id=user_id,
+            channel_id=chat_id,
+            actor=actor,
+        )
 
 
 class ConfigurableFeishuIdentityMapper:
@@ -42,7 +89,16 @@ class ConfigurableFeishuIdentityMapper:
     def binding_count(self) -> int:
         return len(self._bindings)
 
-    def resolve(self, *, tenant_key: str, chat_id: str, user_id: str) -> FeishuRunContext:
+    def resolve(
+        self,
+        *,
+        tenant_key: str,
+        chat_id: str,
+        user_id: str,
+        chat_type: ChatType = "group",
+    ) -> FeishuRunContext:
+        if not tenant_key.strip():
+            raise PermissionError("missing Feishu tenant_key")
         key = (tenant_key, chat_id)
         project = self._bindings.get(key)
         if project is None:
@@ -50,7 +106,21 @@ class ConfigurableFeishuIdentityMapper:
         users = self._allowed_users.get(key)
         if users is not None and user_id not in users:
             raise PermissionError("Feishu user is not allowed for this project chat")
-        return FeishuRunContext(project=project, user_id=user_id, channel_id=chat_id)
+        # Binding already validated Feishu tenant_key+chat_id. Downstream Hermes /
+        # ProjectSpace expect actor.tenant_key == ProjectLens project.tenant_id
+        # (may differ via lens_tenant_id).
+        actor = build_feishu_actor_context(
+            tenant_key=project.tenant_id,
+            actor_id=user_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+        )
+        return FeishuRunContext(
+            project=project,
+            user_id=user_id,
+            channel_id=chat_id,
+            actor=actor,
+        )
 
 
 def parse_project_bindings(
@@ -58,12 +128,17 @@ def parse_project_bindings(
     *,
     default_project: ProjectRef,
     registered_projects: Iterable[ProjectRef] | None = None,
+    allow_demo_fallback: bool = False,
 ) -> ConfigurableFeishuIdentityMapper:
     projects = tuple(registered_projects or (default_project,))
     if not raw.strip():
-        return ConfigurableFeishuIdentityMapper(
-            bindings={(default_project.tenant_id, "chat-1"): default_project}
-        )
+        # Phase 0: empty bindings must not invent demo/chat-1. Demo fallback is
+        # only for explicit local development fixture wiring.
+        if allow_demo_fallback:
+            return ConfigurableFeishuIdentityMapper(
+                bindings={(default_project.tenant_id, "chat-1"): default_project}
+            )
+        return ConfigurableFeishuIdentityMapper(bindings={})
     payload: dict[str, Any] = json.loads(raw)
     bindings: dict[tuple[str, str], ProjectRef] = {}
     allowed_users: dict[tuple[str, str], frozenset[str]] = {}

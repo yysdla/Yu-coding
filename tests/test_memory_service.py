@@ -1,107 +1,77 @@
-from datetime import datetime, timezone
 from uuid import uuid4
 
 from project_lens.application.memory_service import (
-    infer_memory_type,
-    propose_memory_from_answer,
+    consolidate_episodes,
+    propose_memory_from_episode,
+    submit_consolidated_episodes,
 )
-from project_lens.domain.memory import MemoryType
-from project_lens.domain.models import (
-    Claim,
-    ClaimType,
-    Evidence,
-    EvidenceGrade,
-    EvidenceType,
-    ProjectAnswer,
-    ProjectRef,
-    SourceRef,
-)
+from project_lens.context.memory_store import InMemoryMemoryStore
+from project_lens.runtime.memory_approval_gateway import MemoryApprovalGateway
+from project_lens.domain.memory import Episode
+from project_lens.domain.models import ProjectRef
 
 
-def test_propose_memory_from_answer_uses_first_fact_with_evidence() -> None:
-    evidence = Evidence(
-        type=EvidenceType.DOCUMENT,
+def _episode(*, summary: str, evidence_ids=()) -> Episode:
+    return Episode(
         project=ProjectRef(tenant_id="demo", project_id="payment"),
-        source=SourceRef(system="feishu_doc", source_id="doc-1"),
-        content="order-service owner is Ada",
-        observed_at=datetime.now(timezone.utc),
-        access_scope="project:payment:read",
-        content_hash="1234567890abcdefaa",
-    )
-    answer = ProjectAnswer(
-        project=evidence.project,
-        status="identified",
-        business_summary="owner known",
-        technical_summary="owner known",
-        claims=(
-            Claim(
-                text="order-service owner is Ada",
-                type=ClaimType.FACT,
-                evidence_ids=(evidence.id,),
-                grade=EvidenceGrade.B,
-            ),
-            Claim(
-                text="maybe related",
-                type=ClaimType.INFERENCE,
-                evidence_ids=(evidence.id,),
-                grade=EvidenceGrade.C,
-            ),
-        ),
-        evidence=(evidence,),
-    )
-    proposal = propose_memory_from_answer(answer, proposed_by="u1")
-    assert proposal is not None
-    assert proposal.claim_text == "order-service owner is Ada"
-    assert proposal.evidence_ids == (evidence.id,)
-    assert proposal.status == "pending"
-    assert proposal.memory_type == MemoryType.OWNER
-    assert "owner" in proposal.reason
-    assert infer_memory_type("optional coupon is a business rule that must accept null") == (
-        MemoryType.BUSINESS_RULE
+        run_id=uuid4(),
+        title="支付回调调查",
+        summary=summary,
+        started_at=__import__("datetime").datetime(2026, 9, 1),
+        ended_at=__import__("datetime").datetime(2026, 9, 1),
+        status="completed",
+        evidence_ids=tuple(evidence_ids),
     )
 
 
-def test_propose_memory_from_answer_returns_none_without_fact_evidence() -> None:
-    answer = ProjectAnswer(
-        project=ProjectRef(tenant_id="demo", project_id="payment"),
-        status="investigating",
-        business_summary="unknown",
-        technical_summary="unknown",
-        claims=(
-            Claim(
-                text="missing fact",
-                type=ClaimType.UNKNOWN,
-                grade=EvidenceGrade.UNKNOWN,
-            ),
-        ),
-    )
-    assert propose_memory_from_answer(answer, proposed_by="u1") is None
-    # FACT without evidence ids is invalid at model layer; inference alone is not proposable.
+def test_episode_consolidation_requires_evidence_and_creates_pending_proposal() -> None:
     evidence_id = uuid4()
-    inference_only = ProjectAnswer(
-        project=ProjectRef(tenant_id="demo", project_id="payment"),
-        status="investigating",
-        business_summary="guess",
-        technical_summary="guess",
-        claims=(
-            Claim(
-                text="guess only",
-                type=ClaimType.INFERENCE,
-                evidence_ids=(evidence_id,),
-                grade=EvidenceGrade.C,
-            ),
-        ),
-        evidence=(
-            Evidence(
-                id=evidence_id,
-                type=EvidenceType.DOCUMENT,
-                project=ProjectRef(tenant_id="demo", project_id="payment"),
-                source=SourceRef(system="local", source_id="x"),
-                content="guess only",
-                observed_at=datetime.now(timezone.utc),
-                access_scope="project:payment:read",
-                content_hash="1234567890abcdefbb",
-            ),
-        ),
+    proposal = propose_memory_from_episode(
+        _episode(summary="支付回调必须通过 Kafka", evidence_ids=(evidence_id,)),
+        proposed_by="hermes",
     )
-    assert propose_memory_from_answer(inference_only, proposed_by="u1") is None
+
+    assert proposal is not None
+    assert proposal.status == "pending"
+    assert proposal.evidence_ids == (evidence_id,)
+    assert proposal.project.project_id == "payment"
+
+
+def test_episode_consolidation_does_not_promote_placeholder_or_unsupported_summary() -> None:
+    assert propose_memory_from_episode(_episode(summary="未生成回答", evidence_ids=(uuid4(),)), proposed_by="hermes") is None
+    assert propose_memory_from_episode(_episode(summary="支付回调必须通过 Kafka"), proposed_by="hermes") is None
+
+
+def test_batch_consolidation_deduplicates_and_keeps_proposal_only_boundary() -> None:
+    evidence_a, evidence_b = uuid4(), uuid4()
+    first = _episode(summary="支付回调必须通过 Kafka", evidence_ids=(evidence_a,))
+    duplicate = _episode(summary="支付回调必须通过 Kafka。", evidence_ids=(evidence_b,))
+    missing = _episode(summary="前端按钮规范")
+
+    report = consolidate_episodes((first, duplicate, missing), proposed_by="hermes")
+
+    assert report["proposal_count"] == 1
+    assert report["skipped"]["duplicate"] == 1
+    assert report["skipped"]["missing_evidence"] == 1
+    proposal = report["proposals"][0]
+    assert proposal.status == "pending"
+    assert proposal.evidence_ids == (evidence_a,)
+
+
+def test_batch_submission_is_idempotent_and_uses_approval_gateway() -> None:
+    evidence_id = uuid4()
+    episode = _episode(summary="支付回调必须通过 Kafka", evidence_ids=(evidence_id,))
+    gateway = MemoryApprovalGateway(InMemoryMemoryStore())
+
+    first = submit_consolidated_episodes((episode,), approval_gateway=gateway, proposed_by="hermes")
+    second = submit_consolidated_episodes((episode,), approval_gateway=gateway, proposed_by="hermes")
+
+    assert first["submitted_count"] == 1
+    assert second["submitted_count"] == 1
+    assert first["proposals"][0].id == second["proposals"][0].id
+    assert gateway.audit_summary()["pending_creates"] == 2
+
+    proposal_id = first["proposals"][0].id
+    gateway.decide_memory_proposal(proposal_id, approved=True, decided_by="manager")
+    third = submit_consolidated_episodes((episode,), approval_gateway=gateway, proposed_by="hermes")
+    assert third["proposals"][0].status == "approved"

@@ -30,7 +30,8 @@ def test_intent_gate_separates_chitchat_from_project() -> None:
     assert is_project_related_message("最近故障") is True
     assert is_project_related_message("帮我看看这个接口") is True
     assert is_project_related_message("create_order 这个函数怎么实现的？") is True
-    assert is_project_related_message("展开技术细节") is True
+    # Follow-up phrases are not project signals while skill routing is paused.
+    assert is_project_related_message("展开技术细节") is False
 
 
 def test_bot_meta_questions_are_not_project_analysis() -> None:
@@ -79,7 +80,11 @@ def test_answer_card_includes_follow_up_action_buttons() -> None:
     card = render_answer_card(_run("项目地图"), answer)
     actions = [item for item in card["elements"] if item.get("tag") == "action"]
     assert actions
-    labels = [btn["text"]["content"] for btn in actions[0]["actions"]]
+    labels = [
+        btn["text"]["content"]
+        for group in actions
+        for btn in group.get("actions") or []
+    ]
     assert "给技术看的版本" in labels
     assert "查看证据" in labels
     assert "给产品/业务看的版本" in labels
@@ -164,7 +169,7 @@ def test_ask_question_card_action_starts_project_run() -> None:
             "tenant_key": "demo",
         },
         "event": {
-            "operator": {"user_id": "feishu-user-1"},
+            "operator": {"open_id": "feishu-user-1", "user_id": "feishu-user-1"},
             "action": {
                 "tag": "button",
                 "value": {

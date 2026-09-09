@@ -46,6 +46,38 @@ class ToolSpec(FrozenModel):
 
 # Locked registry: agents may read specs, not mutate this module at runtime.
 TOOL_SPECS: dict[str, ToolSpec] = {
+    "search_project_memory": ToolSpec(
+        tool_name="search_project_memory",
+        category=ToolLane.READ,
+        risk_class=RiskClass.READ,
+        surface=SurfaceClass.LOCKED,
+        description="Bounded search over approved active project memories",
+        audit_payload_keys=("project", "query", "returned_count", "omitted_count"),
+    ),
+    "get_memory_detail": ToolSpec(
+        tool_name="get_memory_detail",
+        category=ToolLane.READ,
+        risk_class=RiskClass.READ,
+        surface=SurfaceClass.LOCKED,
+        description="Read one approved active project memory by exact id",
+        audit_payload_keys=("project", "memory_id"),
+    ),
+    "search_project_history": ToolSpec(
+        tool_name="search_project_history",
+        category=ToolLane.READ,
+        risk_class=RiskClass.READ,
+        surface=SurfaceClass.LOCKED,
+        description="Bounded search over historical AgentRuns and safe event summaries",
+        audit_payload_keys=("project", "query", "returned_count", "omitted_count"),
+    ),
+    "get_run_detail": ToolSpec(
+        tool_name="get_run_detail",
+        category=ToolLane.READ,
+        risk_class=RiskClass.READ,
+        surface=SurfaceClass.LOCKED,
+        description="Read one current-project AgentRun detail without raw tool arguments",
+        audit_payload_keys=("project", "run_id"),
+    ),
     "search_context": ToolSpec(
         tool_name="search_context",
         category=ToolLane.READ,

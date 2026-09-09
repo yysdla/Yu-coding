@@ -124,7 +124,7 @@ tests/test_project_agent_tools_api.py
 相关回归：
 
 ```powershell
-& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe' -m pytest tests/test_project_agent_tools_api.py tests/test_project_agent_ask_api.py tests/test_projectlens_mcp_server.py tests/test_hermes_projectlens_plugin.py tests/test_project_investigation_agent.py tests/test_feishu_http_and_acl.py -q
+& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe' -m pytest tests/test_project_agent_tools_api.py tests/test_project_agent_ask_api.py tests/test_projectlens_mcp_server.py tests/test_hermes_projectlens_plugin.py tests/test_feishu_http_and_acl.py -q
 ```
 
 当前验证结果：

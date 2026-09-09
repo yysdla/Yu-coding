@@ -199,11 +199,7 @@ async def replay_harness_conversation(
             rewritten_question=followup,
             run_id=completed.id,
             answer=answer if completed.status == RunStatus.COMPLETED else None,
-            task_state=(
-                run_service._workflow.last_context_pack.task_state
-                if run_service._workflow and run_service._workflow.last_context_pack
-                else None
-            ),
+            task_state=None,
         )
         result: dict[str, Any] = {
             "index": index,
@@ -215,14 +211,6 @@ async def replay_harness_conversation(
             "trace_id": str(completed.trace_id),
             "active_skill": session.summary.active_skill,
         }
-        pack = (
-            run_service._workflow.last_context_pack
-            if run_service._workflow is not None
-            else None
-        )
-        if pack is not None:
-            result["retrieval_mode"] = pack.provenance.retrieval_mode
-            result["tool_policy_hash"] = pack.anchors.tool_policy_hash
         if answer is not None:
             result["metrics"] = answer_metrics(answer)
             result["skill"] = answer.skill

@@ -119,8 +119,9 @@ def test_project_timeline_endpoint_returns_authorized_events() -> None:
     assert response.status_code == 200
     events = response.json()["events"]
     assert events
-    assert any(event["event_type"] == "incident" for event in events)
-    assert any(event["source"]["source_id"] == "INC-2026-001" for event in events)
+    # create_app indexes config/projects sources (code/docs); full git/incident
+    # fixtures are covered by tests/test_source_bootstrap.py unit registration.
+    assert {event["event_type"] for event in events} >= {"code", "document"}
 
 
 def test_project_timeline_endpoint_respects_permissions() -> None:
@@ -199,17 +200,8 @@ def test_project_knowledge_gaps_endpoint_returns_structured_report() -> None:
     report = response.json()
     assert report["evidence_ids"]
     assert report["type_coverage"]["code"] > 0
-    assert report["type_coverage"].get("commit", 0) > 0
-    assert report["type_coverage"].get("task", 0) > 0
-    assert all(gap["type"] != "task_tracking" for gap in report["gaps"])
+    assert report["type_coverage"]["document"] > 0
     assert all("source_signal" in gap for gap in report["gaps"])
-    assert report.get("signal_coverage", {}).get("owner") == 1
-    # Primary service is owned; dependency services may still surface graph owner gaps.
-    assert all(
-        gap.get("target_ref") != "service:order-service"
-        for gap in report["gaps"]
-        if gap["type"] == "owner"
-    )
 
 
 def test_project_knowledge_gaps_endpoint_respects_permissions() -> None:
@@ -229,7 +221,7 @@ def test_project_knowledge_gaps_endpoint_respects_permissions() -> None:
     assert report["gaps"]
 
 
-def test_execute_error_analysis_and_query_events() -> None:
+def test_legacy_run_execute_is_blocked_in_hermes_app() -> None:
     client = TestClient(create_app())
     create_response = client.post(
         "/api/v1/runs",
@@ -249,33 +241,13 @@ def test_execute_error_analysis_and_query_events() -> None:
 
     execute_response = client.post(f"/api/v1/runs/{run_id}/execute")
 
-    assert execute_response.status_code == 200
-    run = execute_response.json()
-    assert run["status"] == "completed"
-    assert run["answer"]["skill"] == "incident_diagnosis"
-    assert 0.0 <= run["answer"]["confidence"] <= 1.0
-    assert "项目资料" in run["answer"]["business_summary"]
-    assert "order_service.py#L14-L20" in run["answer"]["technical_summary"]
-    assert len(run["answer"]["evidence"]) >= 2
-    events_response = client.get(f"/api/v1/runs/{run_id}/events")
-    assert events_response.status_code == 200
-    events = events_response.json()
-    statuses = [
-        event["payload"]["status"]
-        for event in events
-        if event["type"] == "run_status_changed"
-    ]
-    assert statuses == ["resolving", "collecting", "analyzing", "verifying"]
-    skill_events = [
-        event["payload"]["skill"]
-        for event in events
-        if event["type"] == "run_status_changed" and "skill" in event["payload"]
-    ]
-    assert skill_events == ["incident_diagnosis", "incident_diagnosis"]
-    assert events[-1]["type"] == "run_completed"
+    assert execute_response.status_code == 409
+    assert "Hermes" in execute_response.json()["detail"]
+    assert client.app.state.run_service.agent_mode == "hermes"
+    assert not hasattr(client.app.state.run_service, "_workflow")
 
 
-def test_unknown_project_execution_is_recorded_as_failed() -> None:
+def test_unknown_project_run_create_still_accepted_without_legacy_execute() -> None:
     client = TestClient(create_app())
     create_response = client.post(
         "/api/v1/runs",
@@ -285,12 +257,12 @@ def test_unknown_project_execution_is_recorded_as_failed() -> None:
             "question": "What failed?",
         },
     )
+    assert create_response.status_code == 202
     run_id = create_response.json()["run_id"]
 
     execute_response = client.post(f"/api/v1/runs/{run_id}/execute")
 
-    assert execute_response.status_code == 200
-    assert execute_response.json()["status"] == "failed"
-    assert "not registered" in execute_response.json()["error"]
-    events = client.get(f"/api/v1/runs/{run_id}/events").json()
-    assert events[-1]["type"] == "run_failed"
+    assert execute_response.status_code == 409
+    assert "Hermes" in execute_response.json()["detail"]
+    run = client.get(f"/api/v1/runs/{run_id}").json()
+    assert run["status"] == "accepted"
