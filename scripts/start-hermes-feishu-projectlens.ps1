@@ -1,3 +1,59 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Start Hermes Feishu WebSocket gateway against a local ProjectLens API.
+
+.DESCRIPTION
+  Paths are no longer hardcoded. Defaults:
+  - ProjectLens root = repo root (parent of scripts/)
+  - Hermes root      = $env:HERMES_ROOT or sibling ../hermes-agent-main
+  - HERMES_HOME      = $env:HERMES_HOME or LocalAppData/hermes
+  - Python           = $env:PYTHON_EXE or `py -3.12` / `python`
+
+.PARAMETER ProjectLensRoot
+  Absolute path to this ProjectLens checkout.
+
+.PARAMETER HermesRoot
+  Absolute path to the Hermes agent checkout (must contain hermes_cli).
+
+.PARAMETER HermesHome
+  Hermes home directory (config.yaml / .env).
+
+.PARAMETER PythonExe
+  Python executable used for uvicorn and hermes_cli.
+
+.PARAMETER ApiBaseUrl
+  ProjectLens API base, default http://127.0.0.1:8000/api/v1
+
+.PARAMETER TenantId
+  Default tenant for Hermes ProjectLens tools.
+
+.PARAMETER ProjectId
+  Default project for Hermes ProjectLens tools (demo: payment).
+
+.PARAMETER SkipApiStart
+  Do not auto-start uvicorn if port 8000 is free.
+
+.EXAMPLE
+  .\scripts\start-hermes-feishu-projectlens.ps1
+
+.EXAMPLE
+  .\scripts\start-hermes-feishu-projectlens.ps1 `
+    -HermesRoot "D:\src\hermes-agent-main" `
+    -ProjectId "payment"
+#>
+[CmdletBinding()]
+param(
+    [string]$ProjectLensRoot = "",
+    [string]$HermesRoot = "",
+    [string]$HermesHome = "",
+    [string]$PythonExe = "",
+    [string]$ApiBaseUrl = "http://127.0.0.1:8000/api/v1",
+    [string]$TenantId = "demo",
+    [string]$ProjectId = "payment",
+    [switch]$SkipApiStart
+)
+
 $ErrorActionPreference = "Stop"
 
 function Import-DotEnvValue {
@@ -30,9 +86,76 @@ function Import-DotEnvValue {
     return $null
 }
 
-$projectLensRoot = "C:\Users\Administrator\Desktop\project-lens"
-$hermesRoot = "C:\Users\Administrator\Desktop\hermes-agent-main"
-$projectLensEnv = Join-Path $projectLensRoot ".env"
+function Resolve-PythonExe {
+    param([string]$Preferred)
+
+    if ($Preferred -and (Test-Path $Preferred)) {
+        return (Resolve-Path $Preferred).Path
+    }
+    if ($env:PYTHON_EXE -and (Test-Path $env:PYTHON_EXE)) {
+        return (Resolve-Path $env:PYTHON_EXE).Path
+    }
+
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        try {
+            $resolved = & py -3.12 -c "import sys; print(sys.executable)" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $resolved) {
+                return $resolved.Trim()
+            }
+        } catch { }
+    }
+
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCmd) {
+        return $pythonCmd.Source
+    }
+
+    throw "Python not found. Pass -PythonExe or set PYTHON_EXE."
+}
+
+if (-not $ProjectLensRoot) {
+    $ProjectLensRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
+if (-not (Test-Path $ProjectLensRoot)) {
+    throw "ProjectLensRoot not found: $ProjectLensRoot"
+}
+
+$projectLensEnv = Join-Path $ProjectLensRoot ".env"
+$hermesRepoFromEnv = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_HERMES_REPO"
+
+if (-not $HermesRoot) {
+    if ($env:HERMES_ROOT) {
+        $HermesRoot = $env:HERMES_ROOT
+    } elseif ($hermesRepoFromEnv) {
+        $HermesRoot = $hermesRepoFromEnv
+    } else {
+        $HermesRoot = Join-Path (Split-Path $ProjectLensRoot -Parent) "hermes-agent-main"
+    }
+}
+if (-not (Test-Path $HermesRoot)) {
+    throw @"
+HermesRoot not found: $HermesRoot
+
+Clone Hermes next to this repo, or pass -HermesRoot / set HERMES_ROOT /
+PROJECT_LENS_HERMES_REPO in .env. See docs/feishu-test-quickstart.md
+"@
+}
+
+if (-not $HermesHome) {
+    if ($env:HERMES_HOME) {
+        $HermesHome = $env:HERMES_HOME
+    } else {
+        $HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
+    }
+}
+
+$PythonExe = Resolve-PythonExe -Preferred $PythonExe
+
+$envTenant = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_DEFAULT_TENANT_ID"
+$envProject = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_DEFAULT_PROJECT_ID"
+if ($envTenant) { $TenantId = $envTenant }
+if ($envProject) { $ProjectId = $envProject }
 
 $appId = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_APP_ID"
 $appSecret = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_APP_SECRET"
@@ -42,9 +165,9 @@ if (-not $appId -or -not $appSecret) {
     throw "Missing PROJECT_LENS_FEISHU_APP_ID or PROJECT_LENS_FEISHU_APP_SECRET in $projectLensEnv"
 }
 
-Set-Location $hermesRoot
+Set-Location $HermesRoot
 
-$env:HERMES_HOME = "C:\Users\Administrator\AppData\Local\hermes"
+$env:HERMES_HOME = $HermesHome
 $hermesEnv = Join-Path $env:HERMES_HOME ".env"
 
 # Load Hermes home .env so OPENAI_* / FEISHU_* persist across restarts.
@@ -67,9 +190,9 @@ if (Test-Path $hermesEnv) {
     }
 }
 
-$env:PROJECTLENS_API_BASE_URL = "http://127.0.0.1:8000/api/v1"
-$env:PROJECTLENS_DEFAULT_TENANT_ID = "demo"
-$env:PROJECTLENS_DEFAULT_PROJECT_ID = "deepseek-harness"
+$env:PROJECTLENS_API_BASE_URL = $ApiBaseUrl
+$env:PROJECTLENS_DEFAULT_TENANT_ID = $TenantId
+$env:PROJECTLENS_DEFAULT_PROJECT_ID = $ProjectId
 $projectLensHermesProvider = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_HERMES_PROVIDER"
 $projectLensHermesModel = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_HERMES_MODEL"
 $projectLensHermesBaseUrl = Import-DotEnvValue -Path $projectLensEnv -Key "PROJECT_LENS_FEISHU_HERMES_BASE_URL"
@@ -154,24 +277,27 @@ if (-not $env:FEISHU_REQUIRE_MENTION) {
 $env:FEISHU_ALLOW_ALL_USERS = "true"
 $env:GATEWAY_ALLOW_ALL_USERS = "true"
 
-# Keep the local ProjectLens API available before starting Hermes. The gateway
-# is a separate process and otherwise survives while its tool backend exits.
-$pythonExe = "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe"
-$apiUrl = "http://127.0.0.1:8000/api/v1/integrations/feishu/status"
-$apiListening = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
-if (-not $apiListening) {
-    $apiOut = Join-Path $projectLensRoot "project-lens-api.out.log"
-    $apiErr = Join-Path $projectLensRoot "project-lens-api.err.log"
-    Start-Process -FilePath $pythonExe -WorkingDirectory $projectLensRoot -WindowStyle Hidden `
-        -ArgumentList @("-m", "uvicorn", "project_lens.main:app", "--host", "127.0.0.1", "--port", "8000") `
-        -RedirectStandardOutput $apiOut -RedirectStandardError $apiErr | Out-Null
-    for ($attempt = 0; $attempt -lt 20; $attempt++) {
-        Start-Sleep -Milliseconds 500
-        try {
-            $status = Invoke-WebRequest -Uri $apiUrl -UseBasicParsing -TimeoutSec 2
-            if ($status.StatusCode -eq 200) { break }
-        } catch {
-            if ($attempt -eq 19) { throw "ProjectLens API did not become ready at $apiUrl" }
+# Keep the local ProjectLens API available before starting Hermes.
+$apiUrl = "$ApiBaseUrl/integrations/feishu/status"
+$portMatch = [regex]::Match($ApiBaseUrl, ':(\d+)')
+$apiPort = if ($portMatch.Success) { [int]$portMatch.Groups[1].Value } else { 8000 }
+
+if (-not $SkipApiStart) {
+    $apiListening = Get-NetTCPConnection -LocalPort $apiPort -State Listen -ErrorAction SilentlyContinue
+    if (-not $apiListening) {
+        $apiOut = Join-Path $ProjectLensRoot "project-lens-api.out.log"
+        $apiErr = Join-Path $ProjectLensRoot "project-lens-api.err.log"
+        Start-Process -FilePath $PythonExe -WorkingDirectory $ProjectLensRoot -WindowStyle Hidden `
+            -ArgumentList @("-m", "uvicorn", "project_lens.main:app", "--host", "127.0.0.1", "--port", "$apiPort") `
+            -RedirectStandardOutput $apiOut -RedirectStandardError $apiErr | Out-Null
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            Start-Sleep -Milliseconds 500
+            try {
+                $status = Invoke-WebRequest -Uri $apiUrl -UseBasicParsing -TimeoutSec 2
+                if ($status.StatusCode -eq 200) { break }
+            } catch {
+                if ($attempt -eq 19) { throw "ProjectLens API did not become ready at $apiUrl" }
+            }
         }
     }
 }
@@ -185,18 +311,21 @@ $modelHint = if ($env:OPENAI_MODEL) { $env:OPENAI_MODEL } else { "(see config.ya
 $baseHint = if ($env:OPENAI_BASE_URL) { $env:OPENAI_BASE_URL } else { "(default OpenAI)" }
 
 Write-Host "Hermes Feishu Gateway for ProjectLens" -ForegroundColor Cyan
+Write-Host "ProjectLens root: $ProjectLensRoot" -ForegroundColor Yellow
+Write-Host "Hermes root:      $HermesRoot" -ForegroundColor Yellow
+Write-Host "HERMES_HOME:      $HermesHome" -ForegroundColor Yellow
+Write-Host "Python:           $PythonExe" -ForegroundColor Yellow
 Write-Host "Mode: websocket" -ForegroundColor Yellow
 Write-Host "ProjectLens API: $env:PROJECTLENS_API_BASE_URL" -ForegroundColor Yellow
 Write-Host "ProjectLens default project: $env:PROJECTLENS_DEFAULT_TENANT_ID/$env:PROJECTLENS_DEFAULT_PROJECT_ID" -ForegroundColor Yellow
 Write-Host "Feishu credentials loaded from ProjectLens .env (values hidden)." -ForegroundColor Yellow
 Write-Host "OpenAI provider: key=$openaiReady base=$baseHint model=$modelHint" -ForegroundColor Yellow
 if (-not $openaiReady) {
-    Write-Host "WARNING: OPENAI_API_KEY missing in $hermesEnv — Feishu NL will fail provider auth." -ForegroundColor Red
+    Write-Host "WARNING: OPENAI_API_KEY missing — Feishu NL will fail provider auth." -ForegroundColor Red
 }
 Write-Host ""
 Write-Host "In Feishu, @mention the bot and send:" -ForegroundColor Green
-Write-Host "/project What is this project?" -ForegroundColor Green
-Write-Host "Or a short natural-language ping to verify the LLM provider." -ForegroundColor Green
+Write-Host "介绍一下这个项目" -ForegroundColor Green
 Write-Host ""
 
-& "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe" -m hermes_cli.main gateway run --force
+& $PythonExe -m hermes_cli.main gateway run --force

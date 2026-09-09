@@ -10,6 +10,7 @@
 |------|------|
 | [`projectlens-product-document.md`](projectlens-product-document.md) | 产品定义、目标/非目标、概念、MVP、路线图 |
 | [`feishu-test-quickstart.md`](feishu-test-quickstart.md) | **新人飞书测试**：要配什么、怎么配、怎么冒烟 |
+| [`../config/hermes/README.md`](../config/hermes/README.md) | Hermes `projectlens-safe` profile 拷贝说明 |
 | [`feishu-setup.md`](feishu-setup.md) | 飞书应用、事件回调、权限与联调检查 |
 | [`pilot-launch-config.md`](pilot-launch-config.md) | `.env` 配置剖面（Stub / Safe Live / 测试群） |
 | [`projectspace-onboarding-guide.md`](projectspace-onboarding-guide.md) | 新项目 ProjectSpace 接入 |

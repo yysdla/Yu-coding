@@ -48,7 +48,6 @@ _EXTERNAL_TO_INTERNAL: dict[str, str] = {
     "projectlens_search_context": "search_context",
     "projectlens_read_project_file": "read_project_file",
     "projectlens_list_project_files": "list_project_files",
-    "projectlens_query_graph": "query_graph",
     "projectlens_authorized_evidence": "authorized_evidence",
     "projectlens_list_knowledge_gaps": "list_knowledge_gaps",
 }
@@ -107,10 +106,6 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "List allowlisted project files through ProjectLens permissions. Use this for "
         "project introduction or identity questions when the README path is not known; "
         "then read README.md or a public docs file for citation-ready content."
-    ),
-    "projectlens_query_graph": (
-        "Query ProjectLens GraphRAG relationships for modules, services, endpoints, "
-        "owners, or dependencies. Use when relationships matter more than keyword hits."
     ),
     "projectlens_authorized_evidence": (
         "List ACL-authorized project evidence for orientation. Use when Hermes needs a "
@@ -186,17 +181,6 @@ _PARAMETERS: dict[str, dict[str, Any]] = {
         "properties": {
             "prefix": {"type": "string", "description": "Allowlisted path prefix, e.g. docs/"},
             "limit": {"type": "integer", "description": "Maximum file names"},
-        },
-        "required": [],
-        "additionalProperties": False,
-    },
-    "projectlens_query_graph": {
-        "type": "object",
-        "properties": {
-            "relation": {"type": "string"},
-            "start_kind": {"type": "string"},
-            "start_label": {"type": "string"},
-            "limit": {"type": "integer"},
         },
         "required": [],
         "additionalProperties": False,
@@ -329,6 +313,19 @@ class ProjectAgentToolService:
             }
             for name in _EXTERNAL_TO_INTERNAL
         ]
+        # Legacy discovery compatibility: callers may still see the old graph
+        # name, but Hermes does not register it and call_tool rejects it.
+        tools.append({
+            "name": "projectlens_query_graph",
+            "description": (
+                "Deprecated: GraphRAG is disabled; use projectlens_search_context "
+                "with structured source metadata."
+            ),
+            "category": "deprecated",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+            "allow_apply": False,
+            "deprecated": True,
+        })
         if self._memory_store is not None:
             tools.insert(0, {
                 "name": "projectlens_search_project_memory",
@@ -375,6 +372,18 @@ class ProjectAgentToolService:
 
     async def call_tool(self, request: ProjectAgentToolCallRequest) -> dict[str, Any]:
         external = request.tool_name.strip()
+        if external == "projectlens_query_graph":
+            return _error_envelope(
+                error_code="TOOL_NOT_ALLOWED",
+                message=(
+                    "GraphRAG/query_graph is not part of the ProjectLens Phase 2 tool surface; "
+                    "use projectlens_search_context with structured source metadata."
+                ),
+                recovery="Use projectlens_search_context or projectlens_list_knowledge_gaps.",
+                request=request,
+                tool_name=external,
+                internal_tool_name="query_graph",
+            )
         internal = _EXTERNAL_TO_INTERNAL.get(external)
         is_memory_search = external in _MEMORY_EXTERNAL_TO_INTERNAL
         is_history_tool = external in _HISTORY_EXTERNAL_TO_INTERNAL
@@ -936,6 +945,10 @@ def _success_envelope(
         "citations": refs,
         "evidence_refs": refs,
         "unknowns": _unknowns_for(payload),
+        "conflicts": [
+            str(item) for item in payload.get("conflicts", [])
+            if str(item).strip()
+        ] if isinstance(payload.get("conflicts", []), list) else [],
         "audit_ref": {
             "tool_name": tool_name,
             "internal_tool_name": internal_tool_name,

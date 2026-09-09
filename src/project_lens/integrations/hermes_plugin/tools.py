@@ -19,7 +19,6 @@ FORMAL_TOOL_NAMES: tuple[str, ...] = (
     "projectlens_search_context",
     "projectlens_read_project_file",
     "projectlens_list_project_files",
-    "projectlens_query_graph",
     "projectlens_authorized_evidence",
     "projectlens_list_knowledge_gaps",
 )
@@ -108,16 +107,6 @@ _DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
         "properties": {
             "prefix": {"type": "string", "description": "Allowlisted path prefix, e.g. docs/"},
             "limit": {"type": "integer", "description": "Maximum file names"},
-        },
-        "required": [],
-    },
-    "projectlens_query_graph": {
-        "type": "object",
-        "properties": {
-            "relation": {"type": "string"},
-            "start_kind": {"type": "string"},
-            "start_label": {"type": "string"},
-            "limit": {"type": "integer"},
         },
         "required": [],
     },

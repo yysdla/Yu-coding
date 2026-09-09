@@ -24,7 +24,6 @@ POLICY_VERSION = "v1"
 DEFAULT_READ_TOOLS: tuple[str, ...] = (
     "search_context",
     "read_project_file",
-    "query_graph",
     "list_knowledge_gaps",
 )
 

@@ -239,6 +239,7 @@ async def project_agent_ask(
     response_model=ProjectAgentRoleViewResponse,
 )
 async def project_agent_role_view(
+    request: Request,
     run_id: UUID,
     payload: ProjectAgentRoleViewRequestBody,
     service: ProjectAgentRoleViewService = Depends(get_project_agent_role_view_service),
@@ -248,8 +249,12 @@ async def project_agent_role_view(
     Does not execute investigation again. Does not invent facts.
     """
 
+    try:
+        actor = get_trusted_actor_context(request)
+    except HTTPException:
+        actor = actor_context_from_headers(request)
     result = service.role_view(
-        RoleViewReplayRequest(run_id=run_id, audience=payload.audience)
+        RoleViewReplayRequest(run_id=run_id, audience=payload.audience, actor=actor)
     )
     http_status = result.pop("http_status", None) if isinstance(result, dict) else None
     body = ProjectAgentRoleViewResponse.model_validate(result)
@@ -268,6 +273,8 @@ async def project_agent_role_view(
             code = status.HTTP_409_CONFLICT
         elif body.error_code == "INVALID_AUDIENCE":
             code = status.HTTP_400_BAD_REQUEST
+        elif body.error_code in {"ACCESS_DENIED", "ACCESS_SCOPE_MISSING", "ACCESS_SCOPE_INVALID"}:
+            code = status.HTTP_403_FORBIDDEN
         else:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

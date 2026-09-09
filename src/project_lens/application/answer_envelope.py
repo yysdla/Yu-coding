@@ -38,6 +38,7 @@ def project_answer_to_envelope(
 
     del format
     audience_view = None
+    scope = None
     if run.runtime_access is not None and run.channel_id:
         scope = effective_scope_from_audit_dict(
             run.runtime_access,
@@ -88,7 +89,10 @@ def project_answer_to_envelope(
         unknowns.append("调查结束，但没有形成可展示的结论；请补充资料或更具体的文件路径。")
 
     citations = [
-        _citation_entry(evidence_by_id[UUID(cid)])
+            _citation_entry(
+                evidence_by_id[UUID(cid)],
+                redact_body=(audience_view is not None and audience_view.role.value not in {"developer", "ops"}),
+            )
         for cid in sorted(citation_ids)
         if UUID(cid) in evidence_by_id
     ]
@@ -97,7 +101,12 @@ def project_answer_to_envelope(
         if str(item.id) not in citation_ids and len(citations) < 12:
             if _is_empty_observation(item):
                 continue
-            citations.append(_citation_entry(item))
+            citations.append(
+                _citation_entry(
+                    item,
+                    redact_body=(audience_view is not None and audience_view.role.value not in {"developer", "ops"}),
+                )
+            )
             citation_ids.add(str(item.id))
 
     resolved_tools = tool_names if tool_names is not None else _tool_names_from_events(events)
@@ -209,9 +218,12 @@ def _is_empty_observation(item: Evidence) -> bool:
     return any(marker in content for marker in markers)
 
 
-def _citation_entry(item: Evidence) -> dict[str, Any]:
+def _citation_entry(item: Evidence, *, redact_body: bool = False) -> dict[str, Any]:
     kind = _evidence_kind(item)
-    summary = _truncate(item.content.strip().replace("\n", " "), _CITATION_SUMMARY_MAX)
+    if redact_body and item.type in {EvidenceType.CODE, EvidenceType.LOG}:
+        summary = "授权来源已记录；当前角色不展示正文。"
+    else:
+        summary = _truncate(item.content.strip().replace("\n", " "), _CITATION_SUMMARY_MAX)
     return {
         "id": str(item.id),
         "kind": kind,

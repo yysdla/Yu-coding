@@ -84,7 +84,7 @@ POST /api/v1/feishu/events
 
 默认生产决策路径为 `PROJECT_LENS_AGENT_MODE=hermes`。可执行配置剖面见 [`docs/pilot-launch-config.md`](docs/pilot-launch-config.md)。
 
-**想在飞书群里测试？** 按 [`docs/feishu-test-quickstart.md`](docs/feishu-test-quickstart.md) 配置飞书应用、`.env`、群绑定并完成冒烟提问。
+**想在飞书群里测试？** 按 [`docs/feishu-test-quickstart.md`](docs/feishu-test-quickstart.md) 配置飞书应用、`.env`、群绑定、`open_id` 成员与 Hermes，并完成冒烟提问。Hermes profile 样例见 [`config/hermes/README.md`](config/hermes/README.md)。
 
 ## 项目接入
 

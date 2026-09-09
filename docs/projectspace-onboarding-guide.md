@@ -141,6 +141,9 @@ your-project/
 - `public_sources`：未知成员（guest）可见的最小来源；**必填**（deny-by-default）
 - `members`：项目成员与角色；未列出的 actor 只能看 `public_sources`
 
+真机飞书联调时，`members[].actor_id` 必须是飞书用户 **`open_id`**（形如 `ou_...`），不是花名或邮箱。  
+取 ID 的方法见 [`feishu-test-quickstart.md`](feishu-test-quickstart.md) §2.2。
+
 角色模板可展开为 `role_policies`。角色影响调查范围与表达，不只是卡片过滤。
 
 ### namespaces
@@ -162,7 +165,7 @@ manifest 声明 ≠ 自动拥有写权限；同步与检索仍走 ProjectLens �
 
 ### feishu_chat_bindings
 
-声明哪些飞书群属于该 ProjectSpace。运行时还需 `.env` 中的 `PROJECT_LENS_FEISHU_PROJECT_BINDINGS` 与飞书身份解析一致。
+声明哪些飞书群属于该 ProjectSpace。运行时还需 `.env` 中的 `PROJECT_LENS_FEISHU_PROJECT_BINDINGS` 与飞书身份解析一致。`chat_id` 与 bindings 必须指向同一群。
 
 ### role_policies / chat_visibility_policies
 

@@ -258,6 +258,7 @@ def _build_answer_envelope(
     evidence_refs: list[dict[str, Any]] = []
     facts: list[dict[str, Any]] = []
     unknowns: list[str] = []
+    conflicts: list[str] = []
     next_actions: list[dict[str, Any]] = []
     tool_calls_payload: list[dict[str, Any]] = []
 
@@ -283,6 +284,9 @@ def _build_answer_envelope(
                 facts.append({"text": summary, "citations": citation_ids})
             unknowns.extend(
                 str(item) for item in call.envelope.get("unknowns") or [] if str(item).strip()
+            )
+            conflicts.extend(
+                str(item) for item in call.envelope.get("conflicts") or [] if str(item).strip()
             )
         else:
             hint = str(call.envelope.get("agent_recovery_hint") or "").strip()
@@ -337,6 +341,7 @@ def _build_answer_envelope(
         "facts": facts,
         "inferences": [],
         "unknowns": unknowns,
+        "conflicts": conflicts,
         "next_actions": next_actions,
         "citations": citations,
         "evidence_refs": evidence_refs,

@@ -137,6 +137,14 @@ def test_http_ask_then_role_view_replay_does_not_create_new_run() -> None:
     assert "技术视图" in body["markdown"]
     assert body["audit_ref"]["allow_apply"] is False
 
+    denied = client.post(
+        f"/api/v1/project-agent/runs/{run_id}/role-view",
+        json={"audience": "technical"},
+        headers=project_agent_headers(actor_id="u2", chat_id="role-view-chat"),
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error_code"] == "ACCESS_DENIED"
+
     after_events = client.get(f"/api/v1/runs/{run_id}/events")
     assert after_events.status_code == 200
     assert len(after_events.json()) == before_count
@@ -213,7 +221,7 @@ async def test_role_view_service_replays_without_execute(monkeypatch) -> None:
     monkeypatch.setattr(run_service, "execute", guarded_execute)
 
     replay = role_view.role_view(
-        RoleViewReplayRequest(run_id=UUID(run_id), audience="evidence")
+        RoleViewReplayRequest(run_id=UUID(run_id), audience="evidence", actor=_actor())
     )
     assert replay["ok"] is True
     assert "证据视图" in replay["markdown"]

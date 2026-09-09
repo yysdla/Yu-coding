@@ -21,6 +21,7 @@ from project_lens.application.role_views import (
 )
 from project_lens.application.run_service import RunService
 from project_lens.domain.models import RunStatus
+from project_lens.domain.identity import ActorContext
 from project_lens.project_space.policies import effective_scope_from_audit_dict
 
 
@@ -28,6 +29,7 @@ from project_lens.project_space.policies import effective_scope_from_audit_dict
 class RoleViewReplayRequest:
     run_id: UUID
     audience: str = "team"
+    actor: ActorContext | None = None
 
 
 class ProjectAgentRoleViewService:
@@ -73,6 +75,16 @@ class ProjectAgentRoleViewService:
                 },
             )
 
+        if request.actor is None:
+            return recoverable_error(
+                error_code="ACCESS_DENIED",
+                message="trusted actor context is required to replay a run",
+                retryable=False,
+                agent_recovery_hint="Replay the run through a trusted project identity.",
+                project=run.project,
+                extras={"run_id": str(run.id), "http_status": 403},
+            )
+
         if run.answer is None or run.status != RunStatus.COMPLETED:
             return recoverable_error(
                 error_code="RUN_NOT_READY",
@@ -90,6 +102,47 @@ class ProjectAgentRoleViewService:
                     "http_status": 409,
                 },
             )
+
+        if request.actor is not None:
+            if run.runtime_access is None or not run.channel_id:
+                return recoverable_error(
+                    error_code="ACCESS_SCOPE_MISSING",
+                    message="run has no effective access scope for audience replay",
+                    retryable=False,
+                    agent_recovery_hint="Ask the project question again with a trusted identity.",
+                    project=run.project,
+                    extras={"run_id": str(run.id), "http_status": 403},
+                )
+            try:
+                replay_scope = effective_scope_from_audit_dict(
+                    run.runtime_access,
+                    project=run.project,
+                    actor_id=run.user_id,
+                    chat_id=run.channel_id,
+                )
+            except ValueError:
+                return recoverable_error(
+                    error_code="ACCESS_SCOPE_INVALID",
+                    message="run access scope is invalid",
+                    retryable=False,
+                    agent_recovery_hint="Ask the project question again with a trusted identity.",
+                    project=run.project,
+                    extras={"run_id": str(run.id), "http_status": 403},
+                )
+            if (
+                request.actor.tenant_key != run.project.tenant_id
+                or request.actor.actor_id != replay_scope.actor_id
+                or request.actor.chat_id != replay_scope.chat_id
+                or request.actor.chat_type != replay_scope.chat_type
+            ):
+                return recoverable_error(
+                    error_code="ACCESS_DENIED",
+                    message="current actor is not authorized to replay this run",
+                    retryable=False,
+                    agent_recovery_hint="Replay a run created by the current project identity and chat.",
+                    project=run.project,
+                    extras={"run_id": str(run.id), "http_status": 403},
+                )
 
         events = self._run_service.events(run.id)
         tool_names: tuple[str, ...] = ()

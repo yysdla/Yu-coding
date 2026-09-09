@@ -12,13 +12,13 @@
 
 mcp_servers:
   projectlens:
-    command: "python"
     # Prefer an absolute python path if Hermes PATH differs from your shell.
-    # command: "C:/Users/Administrator/AppData/Local/Programs/Python/Python312/python.exe"
+    command: "python"
+    # command: "C:/Path/To/Python312/python.exe"
     args:
       - "-m"
       - "project_lens.integrations.mcp.server"
-    cwd: "C:/Users/Administrator/Desktop/project-lens"
+    cwd: "C:/Path/To/project-lens"
     # Optional: pass through PROJECT_LENS_* so MCP uses the same registry as API.
     # env:
     #   PROJECT_LENS_LOCAL_PROJECT_REGISTRY: "..."

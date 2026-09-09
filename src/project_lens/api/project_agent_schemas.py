@@ -34,6 +34,7 @@ class ProjectAgentAskResponse(BaseModel):
     facts: list[dict[str, Any]] = Field(default_factory=list)
     inferences: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)
     next_actions: list[dict[str, Any]] = Field(default_factory=list)
     citations: list[dict[str, Any]] = Field(default_factory=list)
     audit_ref: dict[str, Any] = Field(default_factory=dict)
