@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
 from project_lens.context.models import AccessContext, ContextQuery
+from project_lens.context.source_records import FactType, SourceRecord
 from project_lens.domain.models import (
     Evidence,
     EvidenceType,
@@ -141,6 +142,14 @@ class SearchContextTool(BaseTool):
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer"},
+                "fact_type": {
+                    "type": "string",
+                    "enum": [item.value for item in FactType],
+                    "description": (
+                        "Optional structured fact lookup. Use for requirement scope/status, "
+                        "development progress, test status, technical decisions, or owner."
+                    ),
+                },
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -148,6 +157,36 @@ class SearchContextTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> str:
         query = str(kwargs["query"])
+        raw_fact_type = kwargs.get("fact_type")
+        if raw_fact_type:
+            fact_type = FactType(str(raw_fact_type))
+            resolution = self._gateway.resolve_fact(
+                self._project,
+                self._access,
+                fact_type,
+                scope=self._scope,
+            )
+            # ``resolve_fact`` has already applied project, actor, and chat ACLs.
+            # Convert only those visible source snapshots into citation evidence;
+            # do not call another tool internally and accidentally require an
+            # additional permission such as ``authorized_evidence``.
+            visible_records = (*resolution.candidates, *resolution.conflicts)
+            self._ledger.add_many(
+                tuple(item.to_evidence(project=self._project) for item in visible_records)
+            )
+            self._ledger.record_tool(
+                self.name,
+                {
+                    "mode": "fact_resolution",
+                    "fact_type": fact_type.value,
+                    "candidate_count": len(resolution.candidates),
+                    "conflict_count": len(resolution.conflicts),
+                },
+            )
+            return json.dumps(
+                _fact_resolution_payload(resolution),
+                ensure_ascii=False,
+            )
         limit = int(kwargs.get("limit") or 8)
         bundle = self._gateway.search_context(
             ContextQuery(text=query, project=self._project, limit=min(max(limit, 1), 20)),
@@ -170,6 +209,73 @@ class SearchContextTool(BaseTool):
             for hit in bundle.hits[:8]
         ]
         return json.dumps({"hits": hits, "warnings": list(bundle.warnings)}, ensure_ascii=False)
+
+
+def _fact_resolution_payload(resolution: Any) -> dict[str, Any]:
+    selected = resolution.selected
+    conflicts = resolution.conflicts
+    if selected is None:
+        state = "unknown"
+    elif conflicts:
+        state = "conflicted"
+    elif selected.status in {"proposed", "draft", "unconfirmed"}:
+        state = "unconfirmed"
+    elif _is_stale(selected.observed_at):
+        state = "stale"
+    else:
+        state = "confirmed"
+
+    def serialize(item: SourceRecord | None) -> dict[str, Any] | None:
+        if item is None:
+            return None
+        return {
+            "source_id": item.source_id,
+            "source_type": item.source_type.value,
+            "title": item.title,
+            "raw_uri": item.raw_uri,
+            "revision": item.revision,
+            "observed_at": item.observed_at.isoformat(),
+            "status": item.status,
+            "authority_scope": list(item.authority_scope),
+            "fact_value": item.fact_values.get(resolution.fact_type.value),
+        }
+
+    return {
+        "mode": "fact_resolution",
+        "fact_type": resolution.fact_type.value,
+        "state": state,
+        "selected": serialize(selected),
+        "candidates": [serialize(item) for item in resolution.candidates],
+        "conflicts": [serialize(item) for item in conflicts],
+        "reason": resolution.reason,
+        "warnings": _fact_resolution_warnings(
+            selected=selected,
+            conflicts=conflicts,
+            state=state,
+        ),
+    }
+
+
+def _fact_resolution_warnings(
+    *,
+    selected: SourceRecord | None,
+    conflicts: tuple[SourceRecord, ...],
+    state: str,
+) -> list[str]:
+    warnings: list[str] = []
+    if selected is None:
+        warnings.append("没有授权资料可以确认该事实。")
+    if conflicts:
+        warnings.append("存在冲突来源，当前结论不能视为无条件确定。")
+    if state == "stale":
+        warnings.append("当前最佳来源可能已过期，不能视为最新事实。")
+    return warnings
+
+
+def _is_stale(observed_at: datetime, *, now: datetime | None = None) -> bool:
+    current = now or datetime.now(timezone.utc)
+    observed = observed_at if observed_at.tzinfo else observed_at.replace(tzinfo=timezone.utc)
+    return current - observed > timedelta(days=30)
 
 
 class AuthorizedEvidenceTool(BaseTool):

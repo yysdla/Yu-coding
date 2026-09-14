@@ -1,437 +1,291 @@
-# ProjectLens 真实项目试点版开发文档
+# ProjectLens 首个真实项目试点实施方案
 
-更新时间：2026-09-09
+更新时间：2026-09-10
+文档状态：实施基线
+适用对象：产品负责人、项目管理员、研发、测试和 ProjectLens 开发人员
 
-## 1. 开发目标
+## 1. 文档目的
 
-为一个真实项目协作群交付第一版 ProjectLens。ProjectLens 是以项目为上下文、以飞书协作群为工作现场的通用项目协作 Agent，帮助不同部门基于同一批授权资料理解项目、讨论问题和确认事实。
+本文件用于指导 ProjectLens 从资料准备走到真实飞书群聊试点。它回答：试点验证什么、资料如何准备、如何接入和同步、Agent 如何引用证据、缺口如何闭环，以及何时算真正可用。
 
-```text
-真实资料只读同步
--> 统一来源、版本、权限和优先级
--> 生成飞书 LLM Wiki 派生页面
--> Hermes 在被 @ 时检索并回答
--> 发现冲突和知识缺口
--> 管理员可以补充证据并重新同步
-```
+它不是单纯的架构说明，也不是产品宣传稿。原始资料、ProjectSpace、连接器、Evidence、Hermes 和验收问题必须按本文顺序落地。
 
-第一版不做业务、研发、测试、管理者四套不同事实，也不以角色化表达作为核心能力。角色只用于权限控制。成功标准是让团队围绕同一个项目问题更快获得一份有来源、带状态、可继续讨论的共同上下文。
+## 2. 产品方向与当前决策
 
-## 2. 范围与非目标
+ProjectLens 是面向业务、产品、研发、测试和管理者的跨部门项目助手。它以项目为上下文、以飞书协作群为工作现场，读取已授权资料，帮助团队围绕同一组事实讨论需求、开发、测试、发布、风险和决策事项。
 
-### 2.1 首批真实来源
+当前已确认：
 
-- 飞书文档；
-- 飞书多维表格；
-- 已存储的会议纪要；
-- GitHub Issue、Pull Request、Commit 和必要的代码只读内容。
+1. 首个试点使用 ProjectLens 自身；
+2. 首批来源为飞书文档、飞书多维表格、会议纪要和 GitHub；
+3. Agent 使用统一事实回答，不为不同角色维护不同事实版本；
+4. 角色只影响访问权限，不改变事实、来源和不确定性；
+5. 回答需要展示结论、来源、更新时间、冲突和知识缺口；
+6. LLM Wiki 是派生阅读层，不替代原始资料；
+7. 试点阶段不建设 GraphRAG；
+8. 试点阶段只读，不自动修改资料、分配任务或改变项目状态。
 
-### 2.2 首批群聊行为
+## 3. 试点要解决的业务问题
 
-- 仅在被 `@` 或明确提问时响应；
-- 查询当前项目授权范围内的资料；
-- 解释需求范围、已有约定、开发安排和测试安排；
-- 给出当前最可信结论及依据；
-- 展示冲突、过期、缺失和无法确认项；
-- 记录知识缺口，供管理员补充证据。
-- 不因用户角色不同而改变事实；角色只决定可访问资料范围。
+1. 需求、开发、测试和发布之间缺乏完整追踪；
+2. 产品、研发和测试对项目范围及进度理解不一致；
+3. 管理者无法快速知道风险、阻塞和待决策事项；
+4. 团队花费大量时间查找资料和重复解释；
+5. 会议提议、历史记录和当前正式结论容易混淆；
+6. 资料不存在时，团队无法区分“尚未完成”和“没有记录”。
 
-### 2.3 非目标
+首批必须验证：
 
-- 不自动修改原始飞书资料或 GitHub；
-- 不自动改变需求、进度、测试或发布状态；
-- 不自动分派任务或代表团队作决策；
-- 不把普通群聊永久写成正式事实；
-- **不建设 GraphRAG**。资料关联使用结构化元数据、来源链接、版本和状态，不引入图数据库或图检索链路。
-- 不建设四套角色化 Agent 或角色专属事实模型。
+1. 当前正式需求范围是什么；
+2. 某项需求是否已经有开发安排；
+3. 某项需求是否已经有测试安排和测试结果；
+4. 当前有哪些里程碑、风险和阻塞；
+5. 哪些事项需要管理者决策；
+6. 哪些问题目前没有足够证据回答。
 
-## 3. 总体架构
+没有证据时，正确行为是说明无法确认、解释影响，并生成知识缺口。
 
-```text
-Feishu / GitHub read-only connectors
-             |
-             v
-     Source normalization layer
-             |
-             v
- Immutable source records + sync cursor + ACL
-             |
-             +--> EvidenceIndex / RAG retrieval
-             |
-             +--> LLM Wiki draft compiler
-             |        |
-             |        +--> Feishu Wiki pages
-             |
-             +--> authority resolver / conflict detector
-             |
-             v
-       ProjectLens Tool Gateway
-             |
-             v
-        Hermes @mention loop
-             |
-             v
-  AnswerDraft -> Verifier -> Feishu reply
-             |
-             +--> KnowledgeGap queue
-```
+## 4. 端到端流程
 
-ProjectLens 继续负责 ProjectSpace、Evidence、ACL、检索、知识治理和验证；Hermes 负责群聊会话、模型调用和工具循环；Feishu adapter 负责消息和 Wiki API 适配，不直接访问内部索引。
-
-### 3.1 通用回答原则
-
-第一阶段采用一个通用调查和回答链路：
-
-```text
-用户问题
--> 当前项目与权限范围
--> 相关资料检索
--> 来源优先级、版本和时效判断
--> 统一事实、冲突和未知项
--> 带 Evidence 的回答
-```
-
-业务、产品、研发、测试和管理者使用同一套事实判断。用户问题本身决定本次需要查询需求、开发、测试或发布资料；用户角色不决定答案内容，也不生成不同版本的项目事实。
-
-## 4. 现有代码复用与新增边界
-
-### 4.1 复用
-
-- `ProjectSpace` / `ProjectRegistry`：试点项目、群绑定和可读范围；角色仅用于权限解析；
-- `context.connectors`：外部来源连接器抽象；
-- `context.indexing`：资料标准化和 `Evidence` 生成；
-- `EvidenceIndex`、`ContextEngine`：权限过滤、精确检索、BM25 和融合排序；
-- `ProjectMemory`：仅保存经过审批的稳定事实；
-- `KnowledgeGapReport`：承载缺失和冲突发现；
-- `ProjectAgentToolService`：向 Hermes 暴露受限只读工具；
-- `Verifier` / `EvidenceLedger`：保证回答事实可回溯；
-- 现有 Feishu Hermes bridge：维持 `@` 触发和真实 `AgentRun` 审计。
-
-### 4.2 新增模块建议
-
-```text
-src/project_lens/knowledge/
-  models.py              # SourceRecord, WikiPage, KnowledgeGap
-  authority.py           # 按事实类型解析来源优先级
-  conflict.py            # 版本、状态和内容冲突检测
-  wiki_compiler.py       # 由来源生成 Wiki 草稿
-  wiki_publisher.py      # 草稿分级发布到飞书
-  sync_service.py        # 增量同步、游标和幂等
-  metadata.py            # 统一元数据补全与校验
-```
-
-如果现有目录已经有等价模块，应扩展现有边界，不重复创建第二套索引或记忆系统。
-
-## 5. 统一资料模型
-
-原始来源进入系统后转换为不可变 `SourceRecord`，再按内容块生成 `Evidence`：
-
-```text
-SourceRecord
-- source_id
-- source_type
-- project_id
-- title
-- raw_uri
-- revision
-- observed_at
-- effective_from / effective_to
-- owner
-- status
-- topic
-- authority_scope
-- supersedes
-- related_sources
-- access_scope
-- content_hash
-- raw_content_ref
-```
-
-约束：
-
-1. 同一 `source_id + revision` 幂等；
-2. 新 revision 不覆盖旧 revision；
-3. 原文和来源 URI 可追溯；
-4. 所有 `Evidence` 继承项目、权限、来源和版本信息；
-5. 删除或撤销采用失效标记，不物理抹除审计记录。
-
-## 6. 资料类型与权威规则
-
-优先级由事实类型决定：
-
-| 事实类型 | 默认首选来源 | 次级来源 |
-| --- | --- | --- |
-| 需求范围/验收条件 | 正式需求文档、需求多维表 | 已归档会议纪要 |
-| 需求状态/排期 | 项目计划表、需求表状态 | 会议纪要 |
-| 开发进度 | GitHub Issue、PR、Merge | 开发讨论 |
-| 测试状态 | 测试记录、验收结果 | 测试讨论 |
-| 技术决策 | 已确认 ADR、正式技术方案 | 会议纪要 |
-| 负责人 | 项目成员表、任务分派记录 | 会议纪要 |
-
-解析评分由以下因素组成，而非只比较来源类型：
-
-```text
-authority_scope
-+ status
-+ revision
-+ effective time
-+ freshness
-+ project / topic match
-```
-
-会议纪要可以产生 `proposed` 变化，但不能无条件覆盖正式来源。冲突时保留双方证据，并输出选择依据。
-
-## 7. 同步流程
-
-```text
-定时任务或手动 sync
--> 读取 connector cursor
--> 拉取新增 / 变更来源
--> 校验项目和 ACL
+资料准备与治理
+-> 登记来源、状态、负责人和优先级
+-> 飞书应用与 GitHub 只读授权
+-> 创建 ProjectSpace 并绑定群聊
+-> 连接器增量同步
 -> 标准化 SourceRecord
--> 计算 content_hash
--> 幂等写入 source snapshot
--> 分块并写入 EvidenceIndex
--> 更新 Wiki draft
--> 生成 conflict / knowledge gap
--> 对低风险页面发布，对高影响结论进入 review
-```
+-> 生成 Evidence 并建立索引
+-> 检测冲突、过期和知识缺口
+-> Hermes 在被 @ 或明确提问时调用只读工具
+-> Verifier 校验证据、权限和状态
+-> 群聊返回结论和依据
+-> 管理员补证后重新同步
 
-同步要求：
+## 5. 阶段 0：资料准备与知识治理
 
-- 失败可重试，不重复生成同一版本；
-- 单一来源失败不影响其他来源同步；
-- 同步状态可查询：`last_success_at`、`cursor`、`indexed_count`、`failed_count`；
-- 同步不得绕过 ProjectSpace 或 ACL；
-- 真实连接器和本地 fixture 使用同一标准化接口。
+这是当前正在进行的阶段。连接器只能读取已有内容，RAG、Wiki 或更复杂的模型都不能替代缺失的负责人、测试结果、CI 记录和正式决策。
 
-## 8. LLM Wiki 编译与发布
+### 5.1 必备资料
 
-### 8.1 页面结构
+1. 项目总览与资料索引；
+2. 正式需求说明；
+3. 需求决策与变更记录；
+4. 项目计划及里程碑多维表格；
+5. 会议纪要；
+6. 风险、阻塞与待决策事项多维表格；
+7. 测试安排和测试记录；
+8. 发布与验收记录；
+9. 项目业务经营周报；
+10. 知识缺口清单；
+11. GitHub Issue、PR、Commit 和必要代码范围。
 
-每个项目建立一个飞书 Wiki 根空间，按资料类型建立页面：
+### 5.2 每份资料必须明确
 
-```text
-项目 Wiki
-├── 项目总览
-├── 需求资料
-├── 多维表资料
-├── 会议纪要
-├── 开发资料
-├── 测试资料
-├── 发布资料
-└── 项目规则与术语
-```
+- 资料名称和类型；
+- 当前状态；
+- 来源优先级；
+- 维护责任人；
+- 最近更新时间；
+- 已确认内容；
+- 未确认或仅提议内容；
+- 适用范围和关联资料；
+- 缺失证据及影响。
 
-每个页面由固定区块组成：
+### 5.3 当前事实基线
 
-```text
-当前整理
-来源依据
-最近更新
-关联资料
-冲突与待确认
-```
+可以确认：ProjectLens 是跨部门项目助手；首个试点使用 ProjectLens 自身；首批读取飞书文档、多维表格、会议记录和 GitHub；回答需要带证据、更新时间和不确定性；角色只控制权限；试点不做 GraphRAG 和自动写入。
 
-### 8.2 编译原则
+目前不能确认：完整的 GitHub 开发安排和实际进度、具体测试负责人、测试是否已经执行及其结果、最近一次 CI 是否通过、完整的资料访问权限边界。
 
-- 原始资料不可被 Wiki 编译器改写；
-- Wiki 内容必须携带来源 ID、版本和更新时间；
-- 摘要、目录、关键词、时间线和冲突列表可自动发布；
-- 需求范围、开发进度、测试结论、负责人和正式决策必须先生成草稿；
-- 草稿状态和正式状态必须可区分；
-- 发布失败不影响内部 Evidence 和检索结果。
+这些未知必须保留，不能为了让资料显得完整而编造。
 
-### 8.3 发布状态
+### 5.4 阶段完成标准
 
-```text
-draft -> review_required -> published
-                         \-> rejected
-```
+1. 必备资料已经建立；
+2. 正式事实、历史提议和未知项已经区分；
+3. 每类事实都有首选来源；
+4. 每份资料有维护人和更新时间；
+5. 缺失证据已进入知识缺口清单；
+6. 项目总览中可以找到全部资料入口。
 
-低风险摘要可以由系统直接标记为 `published`；高影响事实必须保留 `review_required`，不能被 Hermes 当作确认事实使用。
+## 6. 阶段 1：来源登记、授权和 ProjectSpace
 
-## 9. Hermes 群聊回答流程
+资料准备完成后不会自动进入 Agent，需要登记来源并配置权限。
 
-```text
-收到 @ 问题
--> 解析 ProjectSpace / actor / chat scope
--> 识别问题主题和事实类型
--> 检索相关 Wiki 摘要和 Evidence
--> 调用 projectlens_search_context
--> 必要时读取多维表、GitHub 或会议来源详情
--> authority resolver 计算当前最可信候选
--> conflict detector 检查冲突和过期
--> 生成带 Evidence 引用的 AnswerDraft
--> Verifier 校验引用、权限和状态
--> 在群里回复
--> 写入知识缺口和审计事件
-```
+### 6.1 需要收集的标识
 
-工具结果不得只返回一段拼接文本，应携带：
+飞书文档：每篇文档的 doc_token、原始 URL、文档类型和访问范围。
 
-```text
-source_id / evidence_id
-source_type
-revision
-status
-observed_at
-authority_scope
-summary
-```
+飞书多维表格：app_token、table_id、表名、视图用途、字段类型、字段映射和访问范围。
 
-群聊标准回答结构为：
+GitHub：仓库地址、默认分支、Issue/PR/Commit 范围和只读凭据。
 
-```text
-结论
-依据（来源、版本、更新时间）
-当前范围 / 约定 / 安排
-冲突与不确定性
-知识缺口及其影响
-```
+飞书群和成员：测试群 chat_id、成员 open_id 和群聊可见范围。
 
-同一个问题在访问范围相同的情况下，应得到相同的事实、引用、冲突和未知项。允许根据用户追问调整篇幅，但不得仅因角色不同改变结论或隐藏已经授权的重要不确定性。
+### 6.2 多维表格字段映射
 
-## 10. 知识缺口模型
+功能名称或里程碑名称 -> title / milestone
+目标 -> acceptance_criteria
+开始日期 -> start_date
+结束日期 -> end_date
+季度 -> quarter
+状态 -> status
+负责人 -> owner
+风险 -> risk
+更新时间 -> updated_at
 
-知识缺口分为：
+字段映射失败必须产生 connector warning，不能静默丢失。
 
-- `missing`：没有任何授权资料；
-- `conflict`：存在多个互相矛盾的来源；
-- `stale`：只有过期或失效资料；
-- `unconfirmed`：只有会议提议或 Agent 观察，没有正式确认来源。
+### 6.3 ProjectSpace 责任
 
-每条缺口保存：
+ProjectSpace 定义项目上下文和安全边界，至少包含 tenant_id、project_id、项目展示名、飞书来源、GitHub 来源、项目成员、public_sources、可读范围、群绑定、namespace、文件 allowlist 和连接器元数据。
 
-```text
-gap_id
-project_id
-question
-fact_type
-evidence_ids
-reason
-impact
-suggested_source_type
-status
-created_at / updated_at
-```
+换项目时新增或修改 ProjectSpace manifest，不复制 Hermes 工作流，也不修改 Hermes 核心逻辑。
 
-缺口进入管理员队列，但不自动修改原始来源。补充新来源或确认状态后，重新触发 Wiki 编译和检索索引更新。
+### 6.4 阶段完成标准
 
-## 11. API 与工具契约
+1. ProjectSpace 能被 registry 加载和校验；
+2. 来源、成员和群聊绑定无歧义；
+3. 当前用户和群聊能解析 EffectiveAccessScope；
+4. 飞书应用能读取指定文档和多维表格；
+5. GitHub 能读取指定仓库；
+6. 未授权来源访问失败关闭；
+7. 所有连接器保持只读。
 
-第一版建议提供：
+详细配置参考：projectspace-onboarding-guide.md 和 feishu-test-quickstart.md。
 
-```text
-POST /api/v1/knowledge/sync
-GET  /api/v1/knowledge/sync-status
-GET  /api/v1/knowledge/wiki/draft
-POST /api/v1/knowledge/wiki/publish
-GET  /api/v1/knowledge/gaps
-POST /api/v1/knowledge/gaps/{gap_id}/resolve
-```
+## 7. 阶段 2：同步、标准化与 Evidence 索引
 
-Hermes 继续只使用 `projectlens_*` 只读工具。新增工具优先考虑：
+同步流程：手动或定时触发同步，读取 connector cursor，拉取新增、修改和删除记录，校验项目与 ACL，标准化 SourceRecord，计算 content_hash，幂等保存来源 revision，生成 Evidence，写入 EvidenceIndex，更新同步状态，并检测冲突、过期和知识缺口。
 
-```text
-projectlens_get_wiki_summary
-projectlens_search_context
-projectlens_get_source_detail
-projectlens_list_knowledge_gaps
-```
+SourceRecord 最低字段：source_id、source_type、project_id、title、raw_uri、revision、observed_at、effective_from、effective_to、owner、status、topic、authority_scope、supersedes、related_sources、access_scope、content_hash。
 
-Wiki 发布和缺口解决属于管理操作，必须经过 ProjectLens API 的权限和审计，不开放给普通群聊 Agent 直接调用。
+约束：相同 source_id + revision 重复同步时保持幂等；新版本不覆盖旧版本；Evidence 可以回溯到原始 URL 和版本；删除或撤销使用失效状态，不删除审计历史；单个来源失败不阻塞其他来源同步。
 
-## 12. 安全与权限
+### 7.1 默认权威来源
 
-- 同步时按 ProjectSpace 和来源 ACL 过滤；
-- 检索前过滤，不能只在回答渲染时过滤；
-- 飞书 Wiki 页面只能写入当前项目允许的目标空间；
-- 群聊回答使用 `user scope ∩ chat scope`；
-- 角色只决定访问范围，不决定资料权威性、事实版本或回答模板；
-- 原始资料 URI、Wiki 页面和 Evidence 都记录租户、项目和访问范围；
-- 任何跨项目、越权、敏感文件读取都 fail closed；
-- 会议纪要中的敏感内容不得因为被摘要而扩大可见范围。
+需求范围和验收条件：正式需求文档、需求多维表格优先。
+需求状态和排期：项目计划表、需求表状态优先。
+开发进度：GitHub Issue、PR、Merge、Commit 优先。
+测试状态：测试记录、验收结果、CI 优先。
+风险和阻塞：风险阻塞表、正式周报优先。
+发布状态：发布与验收记录、部署证据优先。
+负责人：成员表、任务分派记录优先。
 
-## 13. 测试与价值验收
+会议纪要可以补充背景和提议，但不能单独证明任务完成或测试通过。
 
-### 13.1 单元和契约测试
+### 7.2 阶段完成标准
 
-- connector 标准化和 revision 幂等；
-- ACL 过滤和跨项目隔离；
-- 事实类型权威解析；
-- 版本、状态、过期和冲突检测；
-- Wiki 草稿结构和来源引用；
-- 高影响内容不会自动发布；
-- 知识缺口创建、解决和重算；
-- Hermes 工具 envelope 和 Evidence 引用完整；
-- 角色不会改变同一问题的事实、引用、冲突和未知项。
+1. 所有登记来源均能查询同步状态；
+2. 可以查看 last_attempt_at、last_success_at、cursor 和错误信息；
+3. 重复同步不会产生重复 Evidence；
+4. 删除和撤销能够传播；
+5. 过期来源会被标记为可能过期；
+6. 检索结果携带来源、版本、更新时间和权限范围；
+7. 同步失败不会让旧证据被误标为最新事实。
 
-### 13.2 真实问题回放
+## 8. 阶段 3：证据问答
 
-从试点群历史中抽取一组匿名问题，至少覆盖：
+Hermes 负责群聊会话、问题理解、模型调用、受限工具循环和回复组织。ProjectLens 负责 ProjectSpace、权限、来源同步、Evidence、检索、来源优先级、冲突、知识缺口、引用校验和审计。飞书适配层不能直接读取数据库、索引或任意文件系统。
 
-- 需求范围；
-- 会议约定；
-- 开发是否开始；
-- 测试是否安排；
-- 文档冲突；
-- 资料缺失。
+回答链路：收到 @ 或明确问题，解析项目、用户和群聊范围，判断事实类型，检索授权 Evidence，必要时读取来源详情，比较来源、状态、版本和时效，检查冲突、过期和缺失，生成 AnswerDraft，Verifier 校验权限和引用，回复群聊，保存 AgentRun、Evidence 引用和知识缺口。
 
-每题标注正确结论、应引用来源、不可泄露内容和必须声明的未知项。
+标准回答结构：
 
-### 13.3 价值指标
+1. 结论；
+2. 依据：来源、版本、更新时间；
+3. 当前范围、约定或安排；
+4. 冲突与不确定性；
+5. 知识缺口及影响；
+6. 建议下一步。
 
-- 有来源依据的事实比例；
-- 需求范围回答准确率；
-- 开发/测试安排判断准确率；
-- 冲突识别率；
-- 知识缺口漏报率；
-- 越权读取和泄露数，必须为 0；
-- 团队重复追问次数变化；
-- 从提问到获得可继续讨论上下文的时间。
+回答状态至少区分 confirmed、observed、proposed、conflicted、stale 和 unknown。同一问题在相同访问范围内必须返回一致的事实、引用、冲突和未知项。
 
-## 14. 实施阶段
+## 9. 阶段 4：知识缺口闭环
 
-### Phase 1：只读同步与内部索引
+缺口类型：missing（没有资料）、conflict（来源矛盾）、stale（只有过期资料）、unconfirmed（只有会议提议或非正式观察）。
 
-- 接入真实飞书文档、多维表格和 GitHub；
-- 建立统一 SourceRecord、同步游标和 Evidence；
-- 完成优先级、冲突和缺口检测；
-- 用 fixture 完成回放测试。
+每条缺口至少保存 gap_id、project_id、question、fact_type、evidence_ids、reason、impact、suggested_source_type、owner、status、created_at、updated_at 和 resolution_evidence_ids。
 
-### Phase 2：LLM Wiki 草稿与发布
+补证流程：Agent 发现无法可靠回答，记录问题、原因、影响和所需证据；责任人更新原始文档、表格或 GitHub；ProjectLens 重新同步、重新计算来源权威性并复测原问题。Agent 不直接把自己的推断写成正式事实。
 
-- 创建项目 Wiki 根空间和资料类型页面；
-- 生成带来源的类型摘要和详情页；
-- 实现低风险自动发布、高影响审核；
-- 提供同步状态和管理员缺口队列。
+## 10. 阶段 5：LLM Wiki 阅读层
 
-### Phase 3：Hermes 群聊试点
+LLM Wiki 用于改善资料浏览体验，但不是首轮证据问答成立的前提，也不是新的事实源。
 
-- 在真实项目群启用 `@` 触发；
-- 回答需求范围、约定、开发和测试安排；
-- 保存 AgentRun、Evidence、引用和知识缺口；
-- 用真实问题回放评估质量。
+建议页面：项目总览、需求与决策、项目计划与里程碑、会议纪要、开发资料、测试资料、发布与验收、风险阻塞与待决策、知识缺口与项目术语。
 
-### Phase 4：根据试点结果收敛
+每页至少包含当前整理、原始来源、版本和更新时间、关联资料、冲突与待确认、页面状态。
 
-- 优先修复错误来源选择、过期误用和冲突漏报；
-- 优化 Wiki 页面可读性和资料治理；
-- 只有在实际协作指标改善后，才扩展新的来源或行动能力；
-- 不因技术完整性引入 GraphRAG 或复杂角色体系。
+目录、摘要、关键词、时间线、资料关联和缺口提示可以自动发布。需求范围、开发完成状态、测试通过结论、发布状态、正式决策、负责人、风险等级和截止时间等高影响事实必须先审核。Wiki 发布失败不得影响 Evidence 索引和群聊问答。
+
+## 11. 阶段 6：真实群聊试点与验收
+
+首批问题：
+
+1. ProjectLens 当前正式需求范围是什么？
+2. 当前有哪些里程碑，哪些已经阻塞？
+3. ProjectLens 是否已经有正式开发安排？
+4. 当前是否已经安排测试？
+5. 测试负责人是谁？
+6. 最近一次测试和 CI 结果是什么？
+7. 当前有哪些风险和待决策事项？
+8. 第二周是否确定接入其他项目？
+9. 为什么这个结论更可信？
+10. 当前还缺哪些资料？
+
+预期行为：项目计划只能证明计划，不能证明已经完成；GitHub Issue 可以证明任务存在，PR 或 Commit 才能支持实现进度；测试计划不能证明测试已经执行或通过；会议提议不能覆盖正式需求；没有测试负责人和 CI 证据时必须回答无法确认；冲突无法消解时同时展示冲突来源；无权限用户不能通过追问获取受限内容。
+
+价值指标：有来源依据的事实比例、需求范围回答准确率、开发和测试安排判断准确率、冲突识别率、知识缺口漏报率、错误确定性回答数量、越权读取和泄露数量、团队重复追问次数变化、获得共同上下文的时间、完成补证的知识缺口数量。
+
+## 12. 当前代码基础与真实接入差距
+
+当前仓库已有：ProjectSpace 和 ProjectRegistry；成员、群聊绑定和访问范围解析；连接器接口及同步游标；飞书文档同步服务和同步状态；飞书多维表格只读读取器及字段映射入口；GitHub、会议和多维表格连接器合同与 fixture 测试；SourceRecord、Evidence、EvidenceIndex、ContextEngine；ConnectorSyncService 和新鲜度状态；Hermes ProjectLens 只读工具链；Verifier、EvidenceLedger、AgentRun 审计基础；KnowledgeGapReport 基础模型。
+
+仍需真实配置或补齐：飞书 App ID、App Secret 和只读权限；全部文档 doc_token；多维表格 app_token、table_id 和真实字段映射；GitHub 仓库和只读凭据；测试群 chat_id；成员 open_id；ProjectSpace manifest；真实来源同步测试；多维表格复杂字段解析验证；固定验收问题集；测试负责人、测试执行和 CI 等知识缺口；LLM Wiki 目标空间（若启用发布）。
+
+“仓库里有连接器代码”不等于“真实来源已经接入”。只有授权、配置、同步、检索和回放全部通过后，该来源才算可用。
+
+## 13. 管理入口与安全边界
+
+实施时优先复用现有 ProjectSpace、连接器同步、飞书文档同步、状态检查和 Project Agent 只读工具入口，不平行建设第二套同步或索引系统。
+
+安全要求：权限必须在检索前过滤；同步必须绑定 tenant 和 project；群聊范围是用户、群聊和来源范围的交集；原始 URI、SourceRecord、Evidence 和 Wiki 页面保留访问范围；跨项目、越权和敏感文件读取默认拒绝；Hermes 不直接读取数据库、向量索引或任意文件；写入、部署、回滚、自动 PR、任务分配和状态修改保持关闭；管理操作必须鉴权并写入审计。
+
+## 14. 分阶段交付顺序
+
+Phase 0：资料准备与治理。交付必备资料、资料索引、权威来源规则和知识缺口清单。
+
+Phase 1：真实来源接入。完成飞书授权、ProjectSpace、文档 Token、多维表格字段映射、GitHub 和群聊绑定。
+
+Phase 2：同步与 Evidence。完成增量同步、幂等、删除传播、新鲜度、Evidence 和权限验证。
+
+Phase 3：可信问答与缺口闭环。完成核心问题回答、冲突检测、知识缺口生成、补证和重新计算。
+
+Phase 4：LLM Wiki。在证据问答可用之后增加派生页面、审核和发布。
+
+Phase 5：真实群聊试点。使用固定问题集和真实协作指标验收，并决定是否扩大范围。
 
 ## 15. 完成定义
 
-第一版只有同时满足以下条件才算完成：
+首个真实项目试点只有同时满足以下条件才算完成：
 
-1. 真实来源可以增量、幂等、可审计地同步；
-2. 原始资料不会被 LLM 覆盖；
-3. Wiki 页面按资料类型可读，并保留来源、版本和状态；
-4. Hermes 只能在被 @ 时通过受限只读工具回答；
-5. 回答中的事实都能回溯到授权 Evidence；
-6. 冲突、缺失、过期和未确认状态不会被伪装成确定事实；
-7. 知识缺口可以交给管理员补证并重新计算；
-8. 真实历史问题回放达到预先设定的质量门槛；
-9. 权限泄露数为 0；
-10. 团队成员确认项目范围和安排的重复沟通成本有可测量下降。
+1. 必备资料已经建立并通过最低质量检查；
+2. ProjectSpace、来源、成员和群聊绑定正确；
+3. 飞书文档、多维表格和 GitHub 能增量、幂等地同步；
+4. 同步状态、失败原因和资料新鲜度可查询；
+5. 原始资料不会被 LLM 覆盖；
+6. Evidence 能回溯到授权来源、版本和更新时间；
+7. Hermes 只能通过受限只读工具读取资料；
+8. 回答能区分正式事实、提议、冲突、过期和未知；
+9. 知识缺口可以被补证并重新计算；
+10. 固定问题集达到预设质量门槛；
+11. 权限泄露数为 0；
+12. 团队能够证明重复查找和确认项目背景的成本有所下降。
+
+## 16. 核心原则
+
+ProjectLens 第一阶段的价值不是让模型“知道更多”，而是让团队讨论同一个项目问题时看到同一组有来源、带状态、可追溯的共同上下文。
+
+正确落地顺序：资料治理 -> 来源登记和授权 -> 同步与 Evidence -> 可信问答 -> 知识缺口闭环 -> Wiki 阅读体验 -> 扩大试点。
+
+复杂技术只有在真实协作指标证明当前能力不足时才增加。GraphRAG 不属于首个试点的默认建设项。

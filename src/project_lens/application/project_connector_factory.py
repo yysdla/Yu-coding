@@ -73,8 +73,24 @@ class ProjectConnectorFactory:
                     base_url=self._feishu_base_url,
                     field_aliases=_string_mapping(metadata.get("field_aliases")),
                 )
-                return FeishuBitableConnector(space.project, reader=reader)
-            return FeishuBitableConnector(space.project, records=records)
+                return FeishuBitableConnector(
+                    space.project,
+                    reader=reader,
+                    topic=str(metadata.get("topic") or "requirement"),
+                    default_status=str(metadata.get("default_status") or "published"),
+                    authority_scope=tuple(str(item) for item in metadata["authority_scope"])
+                    if isinstance(metadata.get("authority_scope"), (list, tuple))
+                    else None,
+                )
+            return FeishuBitableConnector(
+                space.project,
+                records=records,
+                topic=str(metadata.get("topic") or "requirement"),
+                default_status=str(metadata.get("default_status") or "published"),
+                authority_scope=tuple(str(item) for item in metadata["authority_scope"])
+                if isinstance(metadata.get("authority_scope"), (list, tuple))
+                else None,
+            )
         if kind in {"github", "github_repository"}:
             repository = _required_str(metadata, "repository")
             if repository:

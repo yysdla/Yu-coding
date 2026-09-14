@@ -30,6 +30,21 @@ from project_lens.application.wiki_compiler import (
     WikiDraftWorkflowService,
     RecordingWikiPublisher,
 )
+from project_lens.obsidian.errors import ObsidianError
+from project_lens.obsidian.exporter import ObsidianExportService
+from project_lens.obsidian.models import VaultConfig
+from project_lens.obsidian.repository import ObsidianRepository
+from project_lens.obsidian.lint import ObsidianLintService
+from project_lens.obsidian.inbox import ObsidianInboxScanner
+from project_lens.obsidian.git import ObsidianGitService
+from project_lens.application.knowledge_operations import (
+    KnowledgeOperationStore,
+    KnowledgeOperationsService,
+)
+from project_lens.application.obsidian_inbox_service import (
+    ObsidianInboxService,
+    SQLiteKnowledgeProposalStore,
+)
 from project_lens.integrations.feishu.wiki_publisher import FeishuWikiPublisher
 from project_lens.application.connector_sync_status import ConnectorSyncStateStore
 from project_lens.application.hermes_runtime import HermesRuntimeService
@@ -172,6 +187,39 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
     application.state.wiki_draft_compiler = WikiDraftCompiler(
         source_record_store, wiki_draft_store
     )
+    obsidian_export_service = None
+    obsidian_repository = None
+    if settings.obsidian_enabled:
+        # Validate deployment-owned paths while assembling the app, before an
+        # HTTP request can reach the local filesystem boundary.
+        _obsidian_config_for_project(project_registrations[0].project, base_dir)
+        obsidian_export_service = ObsidianExportService(
+            source_store=source_record_store,
+            wiki_store=wiki_draft_store,
+            config_for_project=lambda project: _obsidian_config_for_project(project, base_dir),
+        )
+        obsidian_repository = ObsidianRepository(
+            config_for_project=lambda project: _obsidian_config_for_project(project, base_dir),
+        )
+    application.state.obsidian_export_service = obsidian_export_service
+    application.state.obsidian_repository = obsidian_repository
+    obsidian_inbox_service = None
+    if settings.obsidian_enabled and settings.obsidian_inbox_enabled:
+        obsidian_inbox_scanner = ObsidianInboxScanner(
+            config_for_project=lambda project: _obsidian_config_for_project(project, base_dir),
+        )
+        obsidian_inbox_service = ObsidianInboxService(
+            scanner=obsidian_inbox_scanner,
+            proposal_store=SQLiteKnowledgeProposalStore(database),
+            source_store=source_record_store,
+        )
+    application.state.obsidian_inbox_service = obsidian_inbox_service
+    obsidian_git_service = None
+    if settings.obsidian_enabled and settings.obsidian_git_enabled:
+        obsidian_git_service = ObsidianGitService(
+            config_for_project=lambda project: _obsidian_config_for_project(project, base_dir),
+        )
+    application.state.obsidian_git_service = obsidian_git_service
     resolver_registrations = to_project_registrations(project_registrations)
     default_project = resolver_registrations[0].project
     event_sink = SQLiteEventSink(database)
@@ -221,6 +269,8 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         event_sink=event_sink,
         history_store=history_store,
         memory_vector_scorer=memory_vector_scorer,
+        obsidian_repository=obsidian_repository,
+        obsidian_inbox=obsidian_inbox_service,
         advanced_tools_enabled=settings.feishu_hermes_advanced_tools,
     )
     project_space_inspect_service = ProjectSpaceInspectService(
@@ -326,6 +376,21 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         github_token=settings.github_token,
         github_api_base_url=settings.github_api_base_url,
     )
+    knowledge_operations = None
+    if settings.obsidian_enabled and settings.obsidian_operations_enabled:
+        knowledge_operations = KnowledgeOperationsService(
+            store=KnowledgeOperationStore(database),
+            connector_sync=connector_sync_service,
+            connector_factory=application.state.project_connector_factory,
+            wiki_compiler=application.state.wiki_draft_compiler,
+            obsidian_export=obsidian_export_service,
+            obsidian_lint=ObsidianLintService(
+                source_store=source_record_store,
+                config_for_project=lambda project: _obsidian_config_for_project(project, base_dir),
+            ),
+        )
+    project_agent_tool_service.configure_knowledge_operations(knowledge_operations)
+    application.state.knowledge_operations_service = knowledge_operations
     risk_feedback_service = RiskFeedbackService(
         risk_engine=risk_engine,
         store=risk_feedback_store,
@@ -443,6 +508,34 @@ def _build_conversation_store(database: SQLiteDatabase) -> ConversationStore:
     if backend in {"memory", "inmemory", "in_memory"}:
         return InMemoryConversationStore()
     return SQLiteConversationStore(database)
+
+
+def _obsidian_config_for_project(project, base_dir: Path) -> VaultConfig:
+    """Resolve one project Vault from deployment-owned settings."""
+
+    if settings.obsidian_enabled:
+        if not settings.obsidian_vault_root or not settings.obsidian_allowed_root:
+            raise ObsidianError(
+                "Obsidian export requires PROJECT_LENS_OBSIDIAN_VAULT_ROOT "
+                "and PROJECT_LENS_OBSIDIAN_ALLOWED_ROOT"
+            )
+        vault_parent = Path(settings.obsidian_vault_root).expanduser()
+        allowed_root = Path(settings.obsidian_allowed_root).expanduser()
+    else:
+        # Keep disabled configuration constructible without touching the filesystem.
+        vault_parent = base_dir / ".projectlens-obsidian"
+        allowed_root = base_dir
+    return VaultConfig(
+        root=vault_parent / settings.obsidian_project_subdir / project.project_id,
+        allowed_root=allowed_root,
+        tenant_id=project.tenant_id,
+        project_id=project.project_id,
+        enabled=settings.obsidian_enabled,
+        project_subdir=settings.obsidian_project_subdir,
+        export_mode=settings.obsidian_export_mode,
+        max_file_bytes=settings.obsidian_max_file_bytes,
+        git_enabled=settings.obsidian_git_enabled,
+    )
 
 
 app = create_app(settings.database_path)

@@ -18,9 +18,12 @@ from project_lens.context.memory_retrieval import retrieve_memories
 from project_lens.context.history_memory import derive_episode
 from project_lens.context.history_store import HistoryMemoryStore
 from project_lens.context.models import AccessContext
+from project_lens.context.source_records import FactType
 from project_lens.domain.access import AccessDeniedAnswer, access_denied_for_permission_error
 from project_lens.domain.identity import ChatType
+from project_lens.domain.knowledge_proposal import KnowledgeProposal
 from project_lens.domain.models import Evidence, ProjectRef
+from project_lens.obsidian.errors import ObsidianError
 from project_lens.project_space.policies import (
     ProjectRuntimeContextResolver,
     ResolvedProjectRuntimeContext,
@@ -42,6 +45,9 @@ from project_lens.application.hermes_validation import (
     verify_evidence_links,
 )
 from project_lens.runtime.patch_plan import FilePatch, PatchPlan
+from project_lens.obsidian.repository import ObsidianRepository
+from project_lens.application.knowledge_operations import KnowledgeOperationsService
+from project_lens.application.obsidian_inbox_service import ObsidianInboxService
 
 
 _EXTERNAL_TO_INTERNAL: dict[str, str] = {
@@ -50,6 +56,13 @@ _EXTERNAL_TO_INTERNAL: dict[str, str] = {
     "projectlens_list_project_files": "list_project_files",
     "projectlens_authorized_evidence": "authorized_evidence",
     "projectlens_list_knowledge_gaps": "list_knowledge_gaps",
+    "projectlens_search_wiki": "search_wiki",
+    "projectlens_read_wiki_page": "read_wiki_page",
+    "projectlens_sync_sources": "sync_sources",
+    "projectlens_export_obsidian": "export_obsidian",
+    "projectlens_lint_wiki": "lint_wiki",
+    "projectlens_import_obsidian_inbox": "import_obsidian_inbox",
+    "projectlens_propose_wiki_update": "propose_wiki_update",
 }
 
 _MEMORY_EXTERNAL_TO_INTERNAL: dict[str, str] = {
@@ -115,6 +128,19 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "List known gaps in project documentation, ownership, runbooks, releases, or "
         "coverage. Use when the user asks what ProjectLens still cannot answer well."
     ),
+    "projectlens_search_wiki": (
+        "Search the manifest-registered Obsidian Wiki navigation layer. Results are "
+        "derived context only; use ProjectLens Evidence tools to verify important facts."
+    ),
+    "projectlens_read_wiki_page": (
+        "Read one manifest-registered derived Obsidian Wiki page by relative path. "
+        "This tool cannot read arbitrary Vault files or source mirrors."
+    ),
+    "projectlens_sync_sources": "Run a controlled source sync and return an audited operation summary.",
+    "projectlens_export_obsidian": "Export authorized sources and Wiki drafts to the configured Obsidian Vault.",
+    "projectlens_lint_wiki": "Lint the Obsidian Vault and write a review report without changing sources or Wiki pages.",
+    "projectlens_import_obsidian_inbox": "Import controlled Obsidian Inbox files into proposal records after Evidence and conflict checks.",
+    "projectlens_propose_wiki_update": "Create a Wiki update proposal only; this never publishes confirmed Wiki content or ProjectMemory directly.",
 }
 
 _PARAMETERS: dict[str, dict[str, Any]] = {
@@ -161,6 +187,14 @@ _PARAMETERS: dict[str, dict[str, Any]] = {
         "properties": {
             "query": {"type": "string", "description": "Search text, e.g. create_order coupon"},
             "limit": {"type": "integer", "description": "1-20 results; default 8"},
+            "fact_type": {
+                "type": "string",
+                "enum": [item.value for item in FactType],
+                "description": (
+                    "Optional structured fact lookup. Use for requirement scope/status, "
+                    "development progress, test status, technical decisions, or owner."
+                ),
+            },
         },
         "required": ["query"],
         "additionalProperties": False,
@@ -195,6 +229,65 @@ _PARAMETERS: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {},
         "required": [],
+        "additionalProperties": False,
+    },
+    "projectlens_search_wiki": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "page_types": {"type": "array", "items": {"type": "string"}},
+            "statuses": {"type": "array", "items": {"type": "string"}},
+            "limit": {"type": "integer", "description": "1-8 results; server capped"},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "projectlens_read_wiki_page": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Manifest-registered Wiki-relative path"},
+            "max_chars": {"type": "integer", "description": "Bounded page character budget"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    "projectlens_sync_sources": {
+        "type": "object",
+        "properties": {
+            "connectors": {"type": "array", "items": {"type": "string"}},
+            "compile_wiki": {"type": "boolean"},
+            "export_reviewed": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+        },
+        "required": [],
+        "additionalProperties": False,
+    },
+    "projectlens_export_obsidian": {
+        "type": "object",
+        "properties": {"dry_run": {"type": "boolean"}},
+        "required": [],
+        "additionalProperties": False,
+    },
+    "projectlens_lint_wiki": {
+        "type": "object",
+        "properties": {"dry_run": {"type": "boolean"}},
+        "required": [],
+        "additionalProperties": False,
+    },
+    "projectlens_import_obsidian_inbox": {
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Optional controlled Inbox path"}},
+        "required": [],
+        "additionalProperties": False,
+    },
+    "projectlens_propose_wiki_update": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+            "kind": {"type": "string"},
+        },
+        "required": ["title", "content"],
         "additionalProperties": False,
     },
 }
@@ -260,6 +353,11 @@ _WRITE_OR_UNSAFE_MARKERS = (
     "write",
 )
 
+_PROPOSAL_TOOL_NAMES = {
+    "projectlens_import_obsidian_inbox",
+    "projectlens_propose_wiki_update",
+}
+
 
 @dataclass(frozen=True)
 class ProjectAgentToolCallRequest:
@@ -290,6 +388,9 @@ class ProjectAgentToolService:
         event_sink: Any | None = None,
         history_store: HistoryMemoryStore | None = None,
         memory_vector_scorer: Any | None = None,
+        obsidian_repository: ObsidianRepository | None = None,
+        knowledge_operations: KnowledgeOperationsService | None = None,
+        obsidian_inbox: ObsidianInboxService | None = None,
         advanced_tools_enabled: bool = False,
     ) -> None:
         self._engine = context_engine
@@ -300,18 +401,45 @@ class ProjectAgentToolService:
         self._event_sink = event_sink
         self._history_store = history_store
         self._memory_vector_scorer = memory_vector_scorer
+        self._obsidian = obsidian_repository
+        self._knowledge_operations = knowledge_operations
+        self._obsidian_inbox = obsidian_inbox
         self._advanced_tools_enabled = advanced_tools_enabled
+
+    def configure_knowledge_operations(
+        self,
+        service: KnowledgeOperationsService | None,
+    ) -> None:
+        """Attach deployment-configured knowledge operations after connector setup."""
+
+        self._knowledge_operations = service
+
+    def configure_obsidian_inbox(self, service: ObsidianInboxService | None) -> None:
+        self._obsidian_inbox = service
 
     def list_tools(self) -> dict[str, Any]:
         tools = [
             {
                 "name": name,
                 "description": _TOOL_DESCRIPTIONS[name],
-                "category": "read",
+                "category": "propose" if name in _PROPOSAL_TOOL_NAMES else "read",
                 "parameters": _PARAMETERS[name],
                 "allow_apply": False,
+                "requires_approval": name in _PROPOSAL_TOOL_NAMES,
             }
             for name in _EXTERNAL_TO_INTERNAL
+            if (
+                name not in {"projectlens_search_wiki", "projectlens_read_wiki_page"}
+                or self._obsidian is not None
+            )
+            and (
+                name not in {"projectlens_sync_sources", "projectlens_export_obsidian", "projectlens_lint_wiki"}
+                or self._knowledge_operations is not None
+            )
+            and (
+                name not in {"projectlens_import_obsidian_inbox", "projectlens_propose_wiki_update"}
+                or self._obsidian_inbox is not None
+            )
         ]
         # Legacy discovery compatibility: callers may still see the old graph
         # name, but Hermes does not register it and call_tool rejects it.
@@ -321,7 +449,9 @@ class ProjectAgentToolService:
                 "Deprecated: GraphRAG is disabled; use projectlens_search_context "
                 "with structured source metadata."
             ),
-            "category": "deprecated",
+            # Keep the catalog entry in the read lane for older integrations;
+            # ``deprecated`` and the call-time rejection make its status clear.
+            "category": "read",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "allow_apply": False,
             "deprecated": True,
@@ -471,6 +601,28 @@ class ProjectAgentToolService:
         if internal == "get_run_detail":
             return self._get_run_detail(request=request, external=external, resolved=resolved)
 
+        if internal == "search_wiki":
+            return self._search_wiki(request=request, external=external, resolved=resolved)
+
+        if internal == "read_wiki_page":
+            return self._read_wiki_page(request=request, external=external, resolved=resolved)
+
+        if internal in {"sync_sources", "export_obsidian", "lint_wiki"}:
+            return await self._knowledge_operation(
+                request=request,
+                external=external,
+                internal=internal,
+                resolved=resolved,
+            )
+
+        if internal in {"import_obsidian_inbox", "propose_wiki_update"}:
+            return self._inbox_operation(
+                request=request,
+                external=external,
+                internal=internal,
+                resolved=resolved,
+            )
+
         ledger = InvestigationLedger()
         tool_gateway = self._tool_gateway(resolved)
         read_gateway = ReadContextGateway(self._engine, require_scope=True)
@@ -508,6 +660,279 @@ class ProjectAgentToolService:
             ledger=ledger,
             resolved=resolved,
         )
+
+    def _inbox_operation(
+        self,
+        *,
+        request: ProjectAgentToolCallRequest,
+        external: str,
+        internal: str,
+        resolved: ResolvedProjectRuntimeContext,
+    ) -> dict[str, Any]:
+        if self._obsidian_inbox is None:
+            return _error_envelope(
+                error_code="TOOL_NOT_CONFIGURED",
+                message="Obsidian Inbox proposals are not configured",
+                recovery="Ask an administrator to enable the Obsidian Inbox feature.",
+                request=request,
+                tool_name=external,
+                internal_tool_name=internal,
+                resolved=resolved,
+            )
+        access = _access_context(resolved)
+        try:
+            if internal == "import_obsidian_inbox":
+                result = self._obsidian_inbox.import_inbox(
+                    project=resolved.project,
+                    access=access,
+                    created_by=resolved.actor_id,
+                    relative_path=(
+                        str(request.arguments["path"])
+                        if request.arguments.get("path")
+                        else None
+                    ),
+                )
+                payload = {
+                    "proposal_only": True,
+                    "project": _project_payload(resolved.project),
+                    "imported": [_proposal_payload(item) for item in result.imported],
+                    "duplicates": [_proposal_payload(item) for item in result.duplicates],
+                    "rejected": [
+                        {"path": item.path, "status": item.status, "message": item.message}
+                        for item in result.rejected
+                    ],
+                }
+            else:
+                proposal = self._obsidian_inbox.propose_wiki_update(
+                    project=resolved.project,
+                    access=access,
+                    created_by=resolved.actor_id,
+                    title=str(request.arguments.get("title") or ""),
+                    content=str(request.arguments.get("content") or ""),
+                    kind=str(request.arguments.get("kind") or "wiki_update"),
+                )
+                payload = {"proposal_only": True, "proposal": _proposal_payload(proposal)}
+        except (ObsidianError, PermissionError, ValueError) as exc:
+            return _error_envelope(
+                error_code="PROPOSAL_REJECTED",
+                message=str(exc),
+                recovery="Keep the content in proposed form and provide valid project-scoped evidence.",
+                request=request,
+                tool_name=external,
+                internal_tool_name=internal,
+                resolved=resolved,
+            )
+        envelope = _success_envelope(
+            request=request,
+            tool_name=external,
+            internal_tool_name=internal,
+            result_content=json.dumps(payload, ensure_ascii=False),
+            ledger=InvestigationLedger(),
+            resolved=resolved,
+        )
+        envelope["result"] = payload
+        envelope["audit_ref"].update({"proposal_only": True, "approval_required": True})
+        return envelope
+
+    async def _knowledge_operation(
+        self,
+        *,
+        request: ProjectAgentToolCallRequest,
+        external: str,
+        internal: str,
+        resolved: ResolvedProjectRuntimeContext,
+    ) -> dict[str, Any]:
+        if self._knowledge_operations is None:
+            return _error_envelope(
+                error_code="TOOL_NOT_CONFIGURED",
+                message="knowledge operations are not configured",
+                recovery="Ask an administrator to enable the Obsidian operations feature.",
+                request=request,
+                tool_name=external,
+                internal_tool_name=internal,
+                resolved=resolved,
+            )
+        access = _access_context(resolved)
+        if internal == "sync_sources":
+            operation = await self._knowledge_operations.sync_sources(
+                project=resolved.project,
+                requested_by=resolved.actor_id,
+                access=access,
+                connector_names=tuple(str(item) for item in request.arguments.get("connectors", ())),
+                compile_wiki=bool(request.arguments.get("compile_wiki", True)),
+                export_reviewed=bool(request.arguments.get("export_reviewed", True)),
+                dry_run=bool(request.arguments.get("dry_run", False)),
+            )
+        elif internal == "export_obsidian":
+            operation = self._knowledge_operations.export_obsidian(
+                project=resolved.project,
+                requested_by=resolved.actor_id,
+                access=access,
+                dry_run=bool(request.arguments.get("dry_run", False)),
+            )
+        else:
+            operation = self._knowledge_operations.lint_wiki(
+                project=resolved.project,
+                requested_by=resolved.actor_id,
+                dry_run=bool(request.arguments.get("dry_run", False)),
+            )
+        if operation.status == "failed":
+            return _error_envelope(
+                error_code="KNOWLEDGE_OPERATION_FAILED",
+                message=operation.error or "knowledge operation failed",
+                recovery="Review the operation audit record, then retry the narrow operation.",
+                request=request,
+                tool_name=external,
+                internal_tool_name=internal,
+                resolved=resolved,
+            )
+        payload = {
+            "operation_id": operation.id,
+            "operation_type": operation.operation_type,
+            "status": operation.status,
+            "summary": operation.summary,
+            "error": operation.error,
+            "audit_refs": list(operation.audit_refs),
+        }
+        envelope = _success_envelope(
+            request=request,
+            tool_name=external,
+            internal_tool_name=internal,
+            result_content=json.dumps(payload, ensure_ascii=False),
+            ledger=InvestigationLedger(),
+            resolved=resolved,
+        )
+        envelope["result"] = payload
+        envelope["audit_ref"].update(
+            {"operation_id": operation.id, "operation_type": operation.operation_type}
+        )
+        return envelope
+
+    def _search_wiki(
+        self,
+        *,
+        request: ProjectAgentToolCallRequest,
+        external: str,
+        resolved: ResolvedProjectRuntimeContext,
+    ) -> dict[str, Any]:
+        if self._obsidian is None:
+            return _error_envelope(
+                error_code="TOOL_NOT_CONFIGURED",
+                message="Obsidian Wiki search is not configured",
+                recovery="Use projectlens_search_context for current Evidence.",
+                request=request,
+                tool_name=external,
+                internal_tool_name="search_wiki",
+                resolved=resolved,
+            )
+        try:
+            rows = self._obsidian.search(
+                project=resolved.project,
+                query=str(request.arguments.get("query") or ""),
+                page_types=tuple(str(item) for item in request.arguments.get("page_types", ())),
+                statuses=tuple(str(item) for item in request.arguments.get("statuses", ())),
+                limit=int(request.arguments.get("limit", 8)),
+            )
+        except (ObsidianError, PermissionError, ValueError) as exc:
+            return _error_envelope(
+                error_code="WIKI_UNAVAILABLE",
+                message=str(exc),
+                recovery="Export the project Obsidian Vault first, then retry the Wiki search.",
+                request=request,
+                tool_name=external,
+                internal_tool_name="search_wiki",
+                resolved=resolved,
+            )
+        payload = {
+            "derived": True,
+            "project": _project_payload(resolved.project),
+            "returned_count": len(rows),
+            "pages": [
+                {
+                    "path": item.path,
+                    "title": item.title,
+                    "page_type": item.page_type,
+                    "status": item.status,
+                    "snippet": item.snippet,
+                    "source_keys": list(item.source_keys),
+                    "generated_at": item.generated_at,
+                }
+                for item in rows
+            ],
+            "warnings": [
+                "Obsidian Wiki is a derived navigation layer; verify important facts with ProjectLens Evidence."
+            ],
+        }
+        envelope = _success_envelope(
+            request=request,
+            tool_name=external,
+            internal_tool_name="search_wiki",
+            result_content=json.dumps(payload, ensure_ascii=False),
+            ledger=InvestigationLedger(),
+            resolved=resolved,
+        )
+        envelope["result"] = payload
+        envelope["audit_ref"].update({"derived": True, "wiki_returned_count": len(rows)})
+        return envelope
+
+    def _read_wiki_page(
+        self,
+        *,
+        request: ProjectAgentToolCallRequest,
+        external: str,
+        resolved: ResolvedProjectRuntimeContext,
+    ) -> dict[str, Any]:
+        if self._obsidian is None:
+            return _error_envelope(
+                error_code="TOOL_NOT_CONFIGURED",
+                message="Obsidian Wiki read is not configured",
+                recovery="Export the project Obsidian Vault first, then retry.",
+                request=request,
+                tool_name=external,
+                internal_tool_name="read_wiki_page",
+                resolved=resolved,
+            )
+        try:
+            page = self._obsidian.read(
+                project=resolved.project,
+                relative_path=str(request.arguments.get("path") or ""),
+                max_chars=int(request.arguments.get("max_chars", 12_000)),
+            )
+        except (ObsidianError, PermissionError, ValueError) as exc:
+            return _error_envelope(
+                error_code="WIKI_PAGE_NOT_FOUND",
+                message=str(exc),
+                recovery="Call projectlens_search_wiki and read one returned manifest-registered path.",
+                request=request,
+                tool_name=external,
+                internal_tool_name="read_wiki_page",
+                resolved=resolved,
+            )
+        payload = {
+            "derived": page.derived,
+            "project": _project_payload(resolved.project),
+            "path": page.summary.path,
+            "title": page.summary.title,
+            "page_type": page.summary.page_type,
+            "status": page.summary.status,
+            "content": page.content,
+            "source_keys": list(page.summary.source_keys),
+            "generated_at": page.summary.generated_at,
+            "truncated": page.truncated,
+            "warnings": list(page.warnings)
+            + ["Important facts must be verified with ProjectLens Evidence."],
+        }
+        envelope = _success_envelope(
+            request=request,
+            tool_name=external,
+            internal_tool_name="read_wiki_page",
+            result_content=json.dumps(payload, ensure_ascii=False),
+            ledger=InvestigationLedger(),
+            resolved=resolved,
+        )
+        envelope["result"] = payload
+        envelope["audit_ref"].update({"derived": page.derived, "wiki_path": page.summary.path})
+        return envelope
 
     def _search_project_memory(
         self,
@@ -935,7 +1360,7 @@ def _success_envelope(
     evidence = ledger.all_evidence()
     summary = _summary_for(internal_tool_name, payload, evidence)
     refs = [_evidence_ref(item) for item in evidence[:12]]
-    return {
+    envelope = {
         "ok": True,
         "tool_name": tool_name,
         "internal_tool_name": internal_tool_name,
@@ -966,6 +1391,10 @@ def _success_envelope(
         },
         "visibility_scope": effective_scope_to_audit_dict(resolved.effective_scope),
     }
+    # Preserve structured tool output for Hermes while keeping the compact
+    # summary/citation fields stable for existing callers.
+    envelope["result"] = payload
+    return envelope
 
 
 def _error_envelope(
@@ -1031,6 +1460,25 @@ def _project_payload(project: ProjectRef) -> dict[str, str | None]:
     }
 
 
+def _proposal_payload(proposal: KnowledgeProposal) -> dict[str, Any]:
+    return {
+        "proposal_id": proposal.id,
+        "project": _project_payload(proposal.project),
+        "kind": proposal.kind,
+        "title": proposal.title,
+        "content": proposal.content,
+        "source_path": proposal.source_path,
+        "source_hash": proposal.source_hash,
+        "status": proposal.status.value,
+        "evidence_ids": list(proposal.evidence_ids),
+        "created_by": proposal.created_by,
+        "decided_by": proposal.decided_by,
+        "decision_reason": proposal.decision_reason,
+        "created_at": proposal.created_at.isoformat(),
+        "decided_at": proposal.decided_at.isoformat() if proposal.decided_at else None,
+    }
+
+
 def _evidence_ref(item: Evidence) -> dict[str, Any]:
     return {
         "id": str(item.id),
@@ -1050,11 +1498,17 @@ def _summary_for(
     evidence: tuple[Evidence, ...],
 ) -> str:
     if internal_tool_name == "search_context":
+        if payload.get("mode") == "fact_resolution":
+            state = str(payload.get("state") or "unknown")
+            fact_type = str(payload.get("fact_type") or "fact")
+            return f"fact_resolution for {fact_type}: {state}."
         hits = payload.get("hits") if isinstance(payload.get("hits"), list) else []
         return f"search_context returned {len(hits)} authorized hit(s)."
     if internal_tool_name == "read_project_file":
         path = payload.get("path") or "requested file"
         return f"read_project_file returned an allowlisted snippet for {path}."
+    if internal_tool_name in {"sync_sources", "export_obsidian", "lint_wiki"}:
+        return f"{internal_tool_name} completed as an audited knowledge operation."
     if internal_tool_name == "query_graph":
         paths = payload.get("paths") if isinstance(payload.get("paths"), list) else []
         return f"query_graph returned {len(paths)} relationship path(s)."

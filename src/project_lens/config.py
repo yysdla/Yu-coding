@@ -102,6 +102,17 @@ class Settings(BaseSettings):
     project_spaces_dir: str = "config/projects"
     # Connector freshness window: answers may warn when last_success_at is older.
     connector_freshness_max_age_seconds: int = 86_400
+    # Obsidian is a disabled-by-default local export target. When enabled,
+    # the Vault root must be inside this deployment-owned allowed root.
+    obsidian_enabled: bool = False
+    obsidian_vault_root: str = ""
+    obsidian_allowed_root: str = ""
+    obsidian_project_subdir: str = "projectlens"
+    obsidian_export_mode: str = "reviewed"
+    obsidian_max_file_bytes: int = 1_048_576
+    obsidian_git_enabled: bool = False
+    obsidian_operations_enabled: bool = False
+    obsidian_inbox_enabled: bool = False
 
 
 settings = Settings()

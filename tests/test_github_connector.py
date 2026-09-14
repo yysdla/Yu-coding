@@ -19,6 +19,7 @@ async def test_github_maps_commit_pr_and_rejects_writes() -> None:
                 "number": 42,
                 "title": "hotfix",
                 "html_url": "https://github.example/pr/42",
+                "user": {"login": "reviewer"},
             },
             {"kind": "check_run", "id": "ci-1", "conclusion": "failure"},
             {"kind": "branch", "name": "main"},
@@ -32,6 +33,9 @@ async def test_github_maps_commit_pr_and_rejects_writes() -> None:
     assert kinds["check_run"] is EvidenceType.LOG
     assert kinds["branch"] is EvidenceType.CODE
     assert batch.deleted == ("abc123",)
+    assert next(
+        item for item in batch.records if item.source_id == "42"
+    ).owner == "reviewer"
 
     with pytest.raises(AttributeError, match="read-only"):
         _ = connector.close_issue

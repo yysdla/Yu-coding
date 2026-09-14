@@ -35,6 +35,39 @@
       "name": "project-lens-knowledge",
       "path": "knowledge",
       "namespace": "demo:projectlens:rag"
+    },
+    {
+      "kind": "feishu_bitable",
+      "name": "projectlens_knowledge_gaps",
+      "namespace": "demo:projectlens:rag",
+      "metadata": {
+        "app_token": "WQ49bUqMRa0WBFstVujcTLTsnSb",
+        "table_id": "tblHSUbLX59ezVIY",
+        "view_id": "vewO33v0av",
+        "field_aliases": {
+          "title": "问题",
+          "status": "当前状态",
+          "owner": "责任角色",
+          "acceptance_criteria": "问题说明",
+          "risk": "风险说明",
+          "updated_at": "更新时间",
+          "gap_id": "问题编号",
+          "evidence": "参考依据",
+          "resolution_status": "处理状态"
+        },
+        "topic": "knowledge_gap",
+        "default_status": "unconfirmed",
+        "authority_scope": []
+      }
+    },
+    {
+      "kind": "github",
+      "name": "projectlens_github",
+      "namespace": "demo:projectlens:rag",
+      "metadata": {
+        "repository": "lyly-RMB/Yu-coding",
+        "default_branch": "main"
+      }
     }
   ],
   "feishu_chat_bindings": [
@@ -62,9 +95,15 @@
       "allowed_tools": [
         "search_context",
         "read_project_file",
-        "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page",
+        "sync_sources",
+        "export_obsidian",
+        "lint_wiki",
+        "import_obsidian_inbox",
+        "propose_wiki_update"
       ],
       "forbidden_sources": ["secrets/", ".env", "*.db"],
       "answer_depth": "detailed",
@@ -78,9 +117,15 @@
       "allowed_tools": [
         "search_context",
         "read_project_file",
-        "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page",
+        "sync_sources",
+        "export_obsidian",
+        "lint_wiki",
+        "import_obsidian_inbox",
+        "propose_wiki_update"
       ],
       "forbidden_sources": ["secrets/", ".env", "*.db"],
       "answer_depth": "detailed",
@@ -97,9 +142,15 @@
       "allowed_tools": [
         "search_context",
         "read_project_file",
-        "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page",
+        "sync_sources",
+        "export_obsidian",
+        "lint_wiki",
+        "import_obsidian_inbox",
+        "propose_wiki_update"
       ]
     },
     {
@@ -110,9 +161,15 @@
       "allowed_tools": [
         "search_context",
         "read_project_file",
-        "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page",
+        "sync_sources",
+        "export_obsidian",
+        "lint_wiki",
+        "import_obsidian_inbox",
+        "propose_wiki_update"
       ]
     }
   ]

@@ -30,15 +30,16 @@ Hermes Agent loop
 
 返回当前对外暴露的 ProjectLens 工具目录。
 
-第一版只暴露 5 个只读工具：
+当前正式工具面向证据检索、项目文件读取和知识缺口；`query_graph` 仅为旧集成保留的兼容目录项，已经不属于可调用能力：
 
 ```text
 projectlens_search_context
 projectlens_read_project_file
-projectlens_query_graph
 projectlens_authorized_evidence
 projectlens_list_knowledge_gaps
 ```
+
+旧名称 `projectlens_query_graph` 仍可能出现在目录中并带有 `deprecated: true`，但调用会被拒绝。项目关联使用结构化来源元数据、版本、状态和引用，不建设 GraphRAG。
 
 不暴露内部 grep/list/range 工具，也不暴露任何写工具。
 
@@ -61,6 +62,17 @@ projectlens_list_knowledge_gaps
   }
 }
 ```
+
+对于需求范围、需求状态、开发进度、测试状态、技术决策或负责人问题，优先传入 `fact_type`：
+
+```json
+{
+  "query": "当前正式需求范围是什么？",
+  "fact_type": "requirement_scope"
+}
+```
+
+`result.state` 会返回 `confirmed`、`conflicted`、`unconfirmed`、`stale` 或 `unknown`，并携带选中来源、冲突来源、版本、更新时间和引用。
 
 成功响应核心字段：
 
@@ -86,7 +98,7 @@ projectlens_list_knowledge_gaps
   },
   "visibility_scope": {
     "role": "guest",
-    "allowed_tools": ["search_context", "read_project_file", "query_graph", "list_knowledge_gaps"]
+    "allowed_tools": ["search_context", "read_project_file", "list_knowledge_gaps"]
   }
 }
 ```
@@ -179,4 +191,29 @@ tests/test_project_agent_tools_api.py
 - 等 Hermes runtime 正式暴露 `register_tool` 后，做真机 tool-loop 联调。
 
 不要做：见上一节。
+# 结构化项目事实查询
 
+`projectlens_search_context` 除了普通全文检索，还支持可选参数
+`fact_type`。当问题属于需求范围、需求状态、开发进度、测试状态、
+技术决策或负责人时，Hermes 应优先使用该模式：
+
+```json
+{
+  "query": "当前正式需求范围是什么？",
+  "fact_type": "requirement_scope"
+}
+```
+
+允许的 `fact_type`：
+
+- `requirement_scope`
+- `requirement_status`
+- `development_progress`
+- `test_status`
+- `technical_decision`
+- `owner`
+
+返回的 `result.state` 取值为 `confirmed`、`conflicted`、
+`unconfirmed`、`stale` 或 `unknown`。结果同时携带选中来源、候选来源、
+冲突来源、版本、更新时间和引用。`unknown` 是正常业务结果，Hermes 不得
+根据常识或历史对话补全缺失事实。

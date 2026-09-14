@@ -308,6 +308,53 @@ class ProjectWikiReviewResponse(BaseModel):
     published_uri: str | None = None
 
 
+class ProjectObsidianExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+    include_sources: bool = True
+    include_review: bool = True
+
+
+class ProjectObsidianExportResponse(BaseModel):
+    project: ProjectRef
+    export_id: str
+    exported_paths: tuple[str, ...] = ()
+    skipped_paths: tuple[str, ...] = ()
+    source_count: int = 0
+    wiki_count: int = 0
+    review_count: int = 0
+    conflicted_paths: tuple[str, ...] = ()
+    generated_at: datetime
+
+
+class ProjectKnowledgeOperationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectRef
+    user_id: str = Field(min_length=1, max_length=100)
+    permissions: tuple[str, ...] = ()
+    connectors: tuple[str, ...] = ()
+    compile_wiki: bool = True
+    export_reviewed: bool = True
+    dry_run: bool = False
+
+
+class ProjectKnowledgeOperationResponse(BaseModel):
+    id: str
+    operation_type: str
+    project: ProjectRef
+    requested_by: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    summary: dict[str, object] | None = None
+    error: str | None = None
+    audit_refs: tuple[str, ...] = ()
+
+
 class FeishuDocsSyncRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

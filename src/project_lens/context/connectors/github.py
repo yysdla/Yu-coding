@@ -101,7 +101,9 @@ class GitHubConnector:
                         "source_type": source_type,
                         "revision": record_value(record, "updated_at", "updatedAt", "sha", "id", default=str(rid)),
                         "title": record_value(record, "title", "message", "name", default=str(rid)),
-                        "owner": record_value(record, "owner", "author", "assignee"),
+                        "owner": _person_name(
+                            record_value(record, "owner", "author", "assignee", "user")
+                        ),
                         "status": record_value(record, "status", "state", "conclusion", default="observed"),
                         "topic": record_value(record, "topic", default="development"),
                         "authority_scope": record_value(
@@ -210,3 +212,16 @@ def _cursor_offset(cursor: SyncCursor | None) -> int:
         return max(0, int(cursor.token))
     except ValueError:
         return 0
+
+
+def _person_name(value: Any) -> str | None:
+    """Keep GitHub actor metadata compact and safe for SourceRecord fields."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        for key in ("login", "name", "email"):
+            candidate = value.get(key)
+            if candidate:
+                return str(candidate)[:200]
+        return None
+    return str(value)[:200]

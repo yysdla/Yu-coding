@@ -25,6 +25,8 @@ DEFAULT_READ_TOOLS: tuple[str, ...] = (
     "search_context",
     "read_project_file",
     "list_knowledge_gaps",
+    "search_wiki",
+    "read_wiki_page",
 )
 
 

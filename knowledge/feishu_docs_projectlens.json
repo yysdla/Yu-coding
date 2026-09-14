@@ -1,0 +1,40 @@
+{
+  "documents": [
+    {
+      "tenant_id": "demo",
+      "project_id": "projectlens",
+      "doc_token": "docx_projectlens_overview",
+      "doc_url": "https://feishu.cn/docx/projectlens-overview",
+      "title": "ProjectLens 项目总览（飞书文档）",
+      "content": "ProjectLens 是以项目为上下文、以飞书协作群为工作现场的通用项目协作 Agent。第一阶段只读接入飞书文档、多维表格、会议纪要和 GitHub，通过来源、版本、权限和 Evidence 为团队提供可追溯的共同上下文。Agent 不自动修改原始资料、不自动分派任务、不建设 GraphRAG。",
+      "revision": "2026-09-09-r1",
+      "updated_at": "2026-09-09T10:00:00+08:00",
+      "owner_user_id": "u-project-owner",
+      "access_scope": "project:projectlens:read"
+    },
+    {
+      "tenant_id": "demo",
+      "project_id": "projectlens",
+      "doc_token": "docx_projectlens_scope",
+      "doc_url": "https://feishu.cn/docx/projectlens-scope",
+      "title": "ProjectLens 试点需求范围（飞书文档）",
+      "content": "当前版本必须支持查询需求范围、已有约定、开发安排和测试安排，并返回来源、版本、更新时间、冲突和知识缺口。第一阶段不自动修改需求、进度、测试或发布状态。",
+      "revision": "v1.2",
+      "updated_at": "2026-09-08T16:30:00+08:00",
+      "owner_user_id": "u-product-owner",
+      "access_scope": "project:projectlens:read"
+    },
+    {
+      "tenant_id": "demo",
+      "project_id": "projectlens",
+      "doc_token": "docx_projectlens_old_direction",
+      "doc_url": "https://feishu.cn/docx/projectlens-old-direction",
+      "title": "ProjectLens 旧方向说明（已过期）",
+      "content": "旧方案计划为业务、研发、测试和管理者生成四套角色化回答，并把 GraphRAG 作为默认关联能力。该方案已被 2026-09-09 的试点开发方向替代。",
+      "revision": "2026-08-26-r2",
+      "updated_at": "2026-08-26T09:00:00+08:00",
+      "owner_user_id": "u-project-owner",
+      "access_scope": "project:projectlens:read"
+    }
+  ]
+}

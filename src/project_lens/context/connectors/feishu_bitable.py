@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Iterable
 from urllib.parse import quote
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from project_lens.domain.models import Evidence, EvidenceType, ProjectRef, SourceRef
@@ -26,10 +27,16 @@ class FeishuBitableConnector:
         records: Iterable[dict[str, Any]] = (),
         *,
         reader: "FeishuBitableReader | None" = None,
+        topic: str = "requirement",
+        default_status: str = "published",
+        authority_scope: tuple[str, ...] | None = None,
     ) -> None:
         self.project = project
         self.records = tuple(records)
         self.reader = reader
+        self.topic = topic
+        self.default_status = default_status
+        self.authority_scope = authority_scope
 
     async def health(self) -> ConnectorHealth:
         if self.reader is not None:
@@ -66,15 +73,19 @@ class FeishuBitableConnector:
                 ),
                 "version": record_value(record, "version"),
                 "updated_at": record_value(record, "updated_at", "updatedAt"),
-                "status": record_value(record, "status", default="published"),
+                "status": record_value(record, "status", default=self.default_status),
                 "owner": record_value(record, "owner", "assignee"),
-                "topic": record_value(record, "topic", default="requirement"),
-                "authority_scope": ("requirement_scope", "requirement_status", "owner"),
-                "fact_values": {
-                    "requirement_scope": str(record_value(record, "acceptance_criteria", "acceptanceCriteria", default="")),
-                    "requirement_status": str(record_value(record, "status", default="")),
-                    "owner": str(record_value(record, "owner", "assignee", default="")),
-                },
+                "topic": record_value(record, "topic", default=self.topic),
+                "gap_id": record_value(record, "gap_id"),
+                "reference_evidence": record_value(record, "evidence"),
+                "resolution_status": record_value(record, "resolution_status"),
+                "risk": record_value(record, "risk"),
+                "authority_scope": self.authority_scope
+                if self.authority_scope is not None
+                else ("requirement_scope", "requirement_status", "owner"),
+                "fact_values": _fact_values(record)
+                if self.authority_scope is None
+                else {},
             }
             content = str(meta)
             added.append(
@@ -134,8 +145,14 @@ class FeishuBitableReader:
             query += f"&page_token={quote(page_token, safe='')}"
         url = f"{self._base_url}/open-apis/bitable/v1/apps/{quote(self._app_token, safe='')}/tables/{quote(self._table_id, safe='')}/records?{query}"
         request = Request(url, headers={"Authorization": f"Bearer {self._token_provider.get()}", "Content-Type": "application/json"}, method="GET")
-        with urlopen(request, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        try:
+            with urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Feishu Bitable HTTP {exc.code}: {body[:1000]}"
+            ) from exc
         if int(payload.get("code", 0)) != 0:
             raise RuntimeError(f"Feishu Bitable request failed: {payload}")
         data = payload.get("data") or {}
@@ -158,3 +175,13 @@ def _cursor_offset(cursor: SyncCursor | None) -> int:
         return max(0, int(cursor.token))
     except ValueError:
         return 0
+
+
+def _fact_values(record: dict[str, Any]) -> dict[str, str]:
+    return {
+        "requirement_scope": str(
+            record_value(record, "acceptance_criteria", "acceptanceCriteria", default="")
+        ),
+        "requirement_status": str(record_value(record, "status", default="")),
+        "owner": str(record_value(record, "owner", "assignee", default="")),
+    }

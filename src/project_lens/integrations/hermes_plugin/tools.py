@@ -22,6 +22,19 @@ FORMAL_TOOL_NAMES: tuple[str, ...] = (
     "projectlens_authorized_evidence",
     "projectlens_list_knowledge_gaps",
 )
+OBSIDIAN_TOOL_NAMES: tuple[str, ...] = (
+    "projectlens_search_wiki",
+    "projectlens_read_wiki_page",
+)
+KNOWLEDGE_OPERATION_TOOL_NAMES: tuple[str, ...] = (
+    "projectlens_sync_sources",
+    "projectlens_export_obsidian",
+    "projectlens_lint_wiki",
+)
+INBOX_PROPOSAL_TOOL_NAMES: tuple[str, ...] = (
+    "projectlens_import_obsidian_inbox",
+    "projectlens_propose_wiki_update",
+)
 MEMORY_TOOL_NAMES: tuple[str, ...] = (
     "projectlens_search_project_memory",
     "projectlens_get_memory_detail",
@@ -92,6 +105,18 @@ _DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
         "properties": {
             "query": {"type": "string", "description": "Search text"},
             "limit": {"type": "integer", "description": "1-20 results; default 8"},
+            "fact_type": {
+                "type": "string",
+                "enum": [
+                    "requirement_scope",
+                    "requirement_status",
+                    "development_progress",
+                    "test_status",
+                    "technical_decision",
+                    "owner",
+                ],
+                "description": "Optional structured fact lookup with authority and conflict detection.",
+            },
         },
         "required": ["query"],
     },
@@ -119,6 +144,38 @@ _DEFAULT_PARAMETERS: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {},
         "required": [],
+    },
+    "projectlens_search_wiki": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "page_types": {"type": "array", "items": {"type": "string"}},
+            "statuses": {"type": "array", "items": {"type": "string"}},
+            "limit": {"type": "integer"},
+        },
+        "required": ["query"],
+    },
+    "projectlens_read_wiki_page": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "max_chars": {"type": "integer"},
+        },
+        "required": ["path"],
+    },
+    "projectlens_import_obsidian_inbox": {
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Optional controlled Inbox path"}},
+        "required": [],
+    },
+    "projectlens_propose_wiki_update": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+            "kind": {"type": "string"},
+        },
+        "required": ["title", "content"],
     },
 }
 _ADVANCED_PARAMETERS: dict[str, dict[str, Any]] = {
@@ -170,7 +227,14 @@ def resolve_tool_catalog(client: ProjectLensApiClient) -> list[dict[str, Any]]:
     envelope = client.list_tools()
     tools = envelope.get("tools") if isinstance(envelope, dict) else None
     if envelope.get("ok") is True and isinstance(tools, list) and tools:
-        allowed_names = set(FORMAL_TOOL_NAMES) | set(MEMORY_TOOL_NAMES) | set(HISTORY_TOOL_NAMES)
+        allowed_names = (
+            set(FORMAL_TOOL_NAMES)
+            | set(OBSIDIAN_TOOL_NAMES)
+            | set(KNOWLEDGE_OPERATION_TOOL_NAMES)
+            | set(INBOX_PROPOSAL_TOOL_NAMES)
+            | set(MEMORY_TOOL_NAMES)
+            | set(HISTORY_TOOL_NAMES)
+        )
         client_config = getattr(client, "config", None)
         if getattr(client_config, "advanced_tools_enabled", False):
             allowed_names.update(ADVANCED_TOOL_NAMES)

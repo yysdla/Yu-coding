@@ -15,6 +15,8 @@
 | [`pilot-launch-config.md`](pilot-launch-config.md) | `.env` 配置剖面（Stub / Safe Live / 测试群） |
 | [`projectspace-onboarding-guide.md`](projectspace-onboarding-guide.md) | 新项目 ProjectSpace 接入 |
 | [`projectlens-tool-envelope.md`](projectlens-tool-envelope.md) | 工具与回答信封契约（实现对照） |
+| [`projectlens-obsidian-hermes-knowledge-base.md`](projectlens-obsidian-hermes-knowledge-base.md) | Obsidian 团队知识库与 Hermes 管理方案 |
+| [`projectlens-obsidian-hermes-development-plan.md`](projectlens-obsidian-hermes-development-plan.md) | Obsidian + Hermes 分阶段开发实施方案 |
 
 ## 目标架构
 
@@ -45,3 +47,5 @@
 3. [`feishu-test-quickstart.md`](feishu-test-quickstart.md) — 飞书群联调（新人优先）
 4. [`pilot-launch-config.md`](pilot-launch-config.md) + [`feishu-setup.md`](feishu-setup.md) — 配置细表
 5. [`projectspace-onboarding-guide.md`](projectspace-onboarding-guide.md) — 接入真实项目
+6. [`projectlens-obsidian-hermes-knowledge-base.md`](projectlens-obsidian-hermes-knowledge-base.md) — Obsidian 与 Hermes 知识库方案
+7. [`projectlens-obsidian-hermes-development-plan.md`](projectlens-obsidian-hermes-development-plan.md) — 分阶段开发实施细节

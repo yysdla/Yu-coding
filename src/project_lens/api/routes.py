@@ -33,6 +33,10 @@ from project_lens.api.schemas import (
     WikiPageDraftResponse,
     ProjectWikiReviewRequest,
     ProjectWikiReviewResponse,
+    ProjectObsidianExportRequest,
+    ProjectObsidianExportResponse,
+    ProjectKnowledgeOperationRequest,
+    ProjectKnowledgeOperationResponse,
     ConnectorSyncStatusResponse,
     SourceRecordResponse,
     SourceGapResponse,
@@ -50,6 +54,7 @@ from project_lens.application.connector_sync import ConnectorSyncService
 from project_lens.application.project_connector_factory import ProjectConnectorFactory
 from project_lens.application.wiki_compiler import WikiDraftCompiler
 from project_lens.application.wiki_compiler import WikiDraftWorkflowService
+from project_lens.obsidian.exporter import ObsidianExportService
 from project_lens.application.run_service import RunService
 from project_lens.context.bootstrap import LocalProjectRegistration
 from project_lens.context.engine import ContextEngine
@@ -57,6 +62,8 @@ from project_lens.context.models import AccessContext
 from project_lens.context.source_store import SourceRecordStore
 from project_lens.domain.feishu_doc_sync import FeishuDocSyncStatusValue
 from project_lens.domain.models import AgentRun
+from project_lens.obsidian.errors import ObsidianError
+from project_lens.application.knowledge_operations import KnowledgeOperationsService
 from project_lens.application.release_gates import evaluate_release_gates
 from project_lens.config import settings
 
@@ -93,6 +100,14 @@ def get_wiki_draft_compiler(request: Request) -> WikiDraftCompiler | None:
 
 def get_wiki_draft_workflow(request: Request) -> WikiDraftWorkflowService | None:
     return getattr(request.app.state, "wiki_draft_workflow", None)
+
+
+def get_obsidian_export_service(request: Request) -> ObsidianExportService | None:
+    return getattr(request.app.state, "obsidian_export_service", None)
+
+
+def get_knowledge_operations(request: Request) -> KnowledgeOperationsService | None:
+    return getattr(request.app.state, "knowledge_operations_service", None)
 
 
 def get_feishu_doc_sync(request: Request) -> FeishuDocumentSyncService | None:
@@ -510,6 +525,150 @@ def project_wiki_review(
 
 
 @router.post(
+    "/projects/obsidian/export",
+    response_model=ProjectObsidianExportResponse,
+    tags=["projects"],
+)
+def project_obsidian_export(
+    payload: ProjectObsidianExportRequest,
+    export_service: ObsidianExportService | None = Depends(get_obsidian_export_service),
+    registrations: tuple[LocalProjectRegistration, ...] = Depends(get_local_registrations),
+) -> ProjectObsidianExportResponse:
+    registration = _match_registration(payload.project, registrations)
+    if registration is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project is not registered")
+    if registration.access_scope not in payload.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="missing project access scope for Obsidian export",
+        )
+    if export_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Obsidian export is not configured",
+        )
+    try:
+        result = export_service.export_project(
+            project=registration.project,
+            access=AccessContext(
+                tenant_id=payload.project.tenant_id,
+                user_id=payload.user_id,
+                permissions=frozenset(payload.permissions),
+            ),
+            include_sources=payload.include_sources,
+            include_review=payload.include_review,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except ObsidianError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return ProjectObsidianExportResponse(
+        project=result.project,
+        export_id=result.export_id,
+        exported_paths=result.exported_paths,
+        skipped_paths=result.skipped_paths,
+        source_count=result.source_count,
+        wiki_count=result.wiki_count,
+        review_count=result.review_count,
+        conflicted_paths=result.conflicted_paths,
+        generated_at=result.generated_at,
+    )
+
+
+@router.post(
+    "/projects/knowledge-operations/sync",
+    response_model=ProjectKnowledgeOperationResponse,
+    tags=["projects"],
+)
+async def project_knowledge_sync(
+    payload: ProjectKnowledgeOperationRequest,
+    operations: KnowledgeOperationsService | None = Depends(get_knowledge_operations),
+    registrations: tuple[LocalProjectRegistration, ...] = Depends(get_local_registrations),
+) -> ProjectKnowledgeOperationResponse:
+    registration = _require_operation_access(payload.project, payload.permissions, registrations)
+    if operations is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="knowledge operations are not configured")
+    operation = await operations.sync_sources(
+        project=registration.project,
+        requested_by=payload.user_id,
+        access=AccessContext(
+            tenant_id=payload.project.tenant_id,
+            user_id=payload.user_id,
+            permissions=frozenset(payload.permissions),
+        ),
+        connector_names=payload.connectors,
+        compile_wiki=payload.compile_wiki,
+        export_reviewed=payload.export_reviewed,
+        dry_run=payload.dry_run,
+    )
+    return ProjectKnowledgeOperationResponse.model_validate(operation.__dict__)
+
+
+@router.post(
+    "/projects/knowledge-operations/export",
+    response_model=ProjectKnowledgeOperationResponse,
+    tags=["projects"],
+)
+async def project_knowledge_export(
+    payload: ProjectKnowledgeOperationRequest,
+    operations: KnowledgeOperationsService | None = Depends(get_knowledge_operations),
+    registrations: tuple[LocalProjectRegistration, ...] = Depends(get_local_registrations),
+) -> ProjectKnowledgeOperationResponse:
+    registration = _require_operation_access(payload.project, payload.permissions, registrations)
+    if operations is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="knowledge operations are not configured")
+    operation = operations.export_obsidian(
+        project=registration.project,
+        requested_by=payload.user_id,
+        access=AccessContext(
+            tenant_id=payload.project.tenant_id,
+            user_id=payload.user_id,
+            permissions=frozenset(payload.permissions),
+        ),
+        dry_run=payload.dry_run,
+    )
+    return ProjectKnowledgeOperationResponse.model_validate(operation.__dict__)
+
+
+@router.post(
+    "/projects/knowledge-operations/lint",
+    response_model=ProjectKnowledgeOperationResponse,
+    tags=["projects"],
+)
+async def project_knowledge_lint(
+    payload: ProjectKnowledgeOperationRequest,
+    operations: KnowledgeOperationsService | None = Depends(get_knowledge_operations),
+    registrations: tuple[LocalProjectRegistration, ...] = Depends(get_local_registrations),
+) -> ProjectKnowledgeOperationResponse:
+    registration = _require_operation_access(payload.project, payload.permissions, registrations)
+    if operations is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="knowledge operations are not configured")
+    operation = operations.lint_wiki(
+        project=registration.project,
+        requested_by=payload.user_id,
+        dry_run=payload.dry_run,
+    )
+    return ProjectKnowledgeOperationResponse.model_validate(operation.__dict__)
+
+
+@router.get(
+    "/projects/knowledge-operations/{operation_id}",
+    response_model=ProjectKnowledgeOperationResponse,
+    tags=["projects"],
+)
+def project_knowledge_operation(
+    operation_id: str,
+    operations: KnowledgeOperationsService | None = Depends(get_knowledge_operations),
+) -> ProjectKnowledgeOperationResponse:
+    if operations is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="knowledge operations are not configured")
+    operation = operations.get(operation_id)
+    if operation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="knowledge operation not found")
+    return ProjectKnowledgeOperationResponse.model_validate(operation.__dict__)
+
+
+@router.post(
     "/projects/feishu-docs/sync",
     response_model=FeishuDocsSyncResponse,
     tags=["projects"],
@@ -618,6 +777,22 @@ def _match_registration(
         ):
             return item
     return None
+
+
+def _require_operation_access(
+    project: object,
+    permissions: tuple[str, ...],
+    registrations: tuple[LocalProjectRegistration, ...],
+) -> LocalProjectRegistration:
+    registration = _match_registration(project, registrations)
+    if registration is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project is not registered")
+    if registration.access_scope not in permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="missing project access scope for knowledge operation",
+        )
+    return registration
 
 
 def _source_evidence_refs(source: object, evidence: tuple[object, ...]) -> tuple[str, ...]:

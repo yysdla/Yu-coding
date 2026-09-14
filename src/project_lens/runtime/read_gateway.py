@@ -14,6 +14,8 @@ from uuid import uuid4
 from project_lens.context.engine import ContextEngine
 from project_lens.context.knowledge_gaps import build_knowledge_gap_report
 from project_lens.context.models import AccessContext, ContextQuery, EvidenceBundle
+from project_lens.context.authority import AuthorityResolution, resolve_fact as resolve_authority_fact
+from project_lens.context.source_records import FactType, SourceRecord
 from project_lens.domain.models import Evidence, GraphEvidence, KnowledgeGapReport, ProjectRef
 from project_lens.domain.ops import OpsFinding, OpsQuery
 from project_lens.graph.query import GraphQuery
@@ -106,6 +108,51 @@ class ReadContextGateway:
             True,
         )
         return evidence
+
+    def resolve_fact(
+        self,
+        project: ProjectRef,
+        access: AccessContext,
+        fact_type: FactType,
+        scope: EffectiveAccessScope | None = None,
+    ) -> AuthorityResolution:
+        """Resolve one structured project fact after ACL and chat-scope filtering.
+
+        This is intentionally exposed through the existing search read lane. It
+        gives Hermes a deterministic fact lookup for high-value questions without
+        adding a second tool surface or allowing the model to choose authority
+        rules itself.
+        """
+
+        assert_tool_callable("search_context", allow_apply=False)
+        self._enforce_scope(scope, "search_context", project)
+        if scope is None:
+            result = self.engine.resolve_fact(project, access, fact_type)
+        else:
+            resolved = self.engine.resolve_fact(project, access, fact_type)
+            records = tuple(
+                item
+                for item in (*resolved.candidates, *resolved.conflicts)
+                if _source_record_allowed(scope, item)
+            )
+            result = resolve_authority_fact(records, fact_type)
+        self._audit(
+            "search_context",
+            _audit_arguments(
+                project,
+                scope,
+                {
+                    "mode": "fact_resolution",
+                    "fact_type": fact_type.value,
+                    "candidate_count": len(result.candidates),
+                    "conflict_count": len(result.conflicts),
+                    "selected_source_id": result.selected.source_id if result.selected else None,
+                },
+            ),
+            f"fact_type={fact_type.value}; selected={result.selected.source_id if result.selected else 'none'}",
+            True,
+        )
+        return result
 
     def list_knowledge_gaps(
         self,
@@ -303,3 +350,9 @@ def _evidence_paths(evidence: Evidence) -> tuple[str, ...]:
         if not raw.startswith(prefix):
             candidates.append(f"{prefix}{raw.lstrip('/')}")
     return tuple(dict.fromkeys(path for path in candidates if path))
+
+
+def _source_record_allowed(scope: EffectiveAccessScope, record: SourceRecord) -> bool:
+    """Apply the same readable-source policy to durable source snapshots."""
+
+    return _evidence_allowed(scope, record.to_evidence(project=scope.project))

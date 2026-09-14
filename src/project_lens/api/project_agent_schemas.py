@@ -116,6 +116,7 @@ class ProjectAgentToolInfo(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     allow_apply: bool = False
     requires_approval: bool = False
+    deprecated: bool = False
 
 
 class ProjectAgentToolsResponse(BaseModel):
