@@ -1,0 +1,31 @@
+{
+  "entries": [
+    {
+      "content_hash": "1dd02452d64372176d4ed8ae4d2ef8df19b6f9140fd04d9bd6bd5bb9d0a28181",
+      "exported_at": "2026-09-15T03:36:05.869633Z",
+      "relative_path": "00-home/Home.md",
+      "source_keys": [],
+      "status": "draft"
+    },
+    {
+      "content_hash": "be845513094a5eccc8d8256d5c7b160a9d68f9b51a53c1425cf0b08cc744ab8d",
+      "exported_at": "2026-09-15T03:36:05.869633Z",
+      "relative_path": "00-home/Project-Overview.md",
+      "source_keys": [],
+      "status": "draft"
+    },
+    {
+      "content_hash": "55aab49393371aaf5c2f61bbe37d343a2dda8b03f5856852caba4dd32d897cf9",
+      "exported_at": "2026-09-15T03:36:05.869633Z",
+      "relative_path": "50-review/Knowledge-Gaps.md",
+      "source_keys": [],
+      "status": "review_required"
+    }
+  ],
+  "failed_safety_scans": [],
+  "last_export_id": "0dc7120dd706f295202c4d21",
+  "last_success_at": "2026-09-15T03:36:05.869633Z",
+  "project_id": "payment",
+  "schema_version": 1,
+  "tenant_id": "demo"
+}

@@ -1,0 +1,31 @@
+{
+  "entries": [
+    {
+      "content_hash": "ba79256b640162b715443a5c43d3d2094fdd19e1fadbd97a262471520e9ce022",
+      "exported_at": "2026-09-15T04:01:50.251439Z",
+      "relative_path": "00-home/Home.md",
+      "source_keys": [],
+      "status": "draft"
+    },
+    {
+      "content_hash": "7fa61e1ad177ab0272098d7e00bbc17fae5f666c53fd063bdf3fbd3723926161",
+      "exported_at": "2026-09-15T04:01:50.251439Z",
+      "relative_path": "00-home/Project-Overview.md",
+      "source_keys": [],
+      "status": "draft"
+    },
+    {
+      "content_hash": "983961b57d0c75cbe622aa1bd18e610d4be836a254fbbdaa47b1d06d13e1fff8",
+      "exported_at": "2026-09-15T04:01:50.251439Z",
+      "relative_path": "50-review/Knowledge-Gaps.md",
+      "source_keys": [],
+      "status": "review_required"
+    }
+  ],
+  "failed_safety_scans": [],
+  "last_export_id": "5b63aebebb6b8096f8d9b2b1",
+  "last_success_at": "2026-09-15T04:01:50.251439Z",
+  "project_id": "deepseek-harness",
+  "schema_version": 1,
+  "tenant_id": "demo"
+}

@@ -1,0 +1,267 @@
+﻿"""ProjectSpace registry — load from JSON and/or LocalProjectRegistration."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from project_lens.context.bootstrap import LocalProjectRegistration
+from project_lens.domain.models import ProjectRef
+from project_lens.project_space.models import (
+    FeishuChatBindingRef,
+    ProjectSpace,
+    RepositoryRef,
+    SourceConnectorRef,
+)
+from project_lens.project_space.policies import (
+    AnswerDepth,
+    ChatVisibilityPolicy,
+    ProjectMemberRolePolicy,
+    RoleKind,
+    VisibilityLevel,
+)
+
+
+class ProjectRegistry:
+    """In-memory registry keyed by (tenant_id, project_id)."""
+
+    def __init__(self, spaces: tuple[ProjectSpace, ...] = ()) -> None:
+        self._spaces: dict[tuple[str, str], ProjectSpace] = {
+            (space.tenant_id, space.project_id): space for space in spaces
+        }
+
+    def register(self, space: ProjectSpace) -> None:
+        key = (space.tenant_id, space.project_id)
+        if key in self._spaces:
+            raise ValueError(f"duplicate project space: {key}")
+        self._spaces[key] = space
+
+    def upsert(self, space: ProjectSpace) -> None:
+        """Insert or replace a ProjectSpace (JSON overlay wins over local defaults)."""
+
+        self._spaces[(space.tenant_id, space.project_id)] = space
+
+    def get(self, tenant_id: str, project_id: str) -> ProjectSpace | None:
+        return self._spaces.get((tenant_id, project_id))
+
+    def require(self, tenant_id: str, project_id: str) -> ProjectSpace:
+        space = self.get(tenant_id, project_id)
+        if space is None:
+            raise KeyError(f"unknown project space: {tenant_id}/{project_id}")
+        return space
+
+    def list(self) -> tuple[ProjectSpace, ...]:
+        return tuple(self._spaces.values())
+
+    def __len__(self) -> int:
+        return len(self._spaces)
+
+
+def space_from_local_registration(registration: LocalProjectRegistration) -> ProjectSpace:
+    root = registration.sources.repository_root
+    project_root = root.parent if root.name == "src" else root
+    return ProjectSpace(
+        tenant_id=registration.project.tenant_id,
+        project_id=registration.project.project_id,
+        display_name=f"{registration.project.project_id}",
+        repositories=(
+            RepositoryRef(
+                name=registration.project.project_id,
+                path=project_root,
+            ),
+        ),
+        services=(registration.project.service,) if registration.project.service else (),
+        environments=(
+            (registration.project.environment,) if registration.project.environment else ()
+        ),
+        graph_namespace=f"{registration.project.tenant_id}:{registration.project.project_id}",
+        rag_namespace=f"{registration.project.tenant_id}:{registration.project.project_id}:rag",
+        memory_namespace=f"{registration.project.tenant_id}:{registration.project.project_id}",
+        access_scope=registration.access_scope,
+        documents_root=registration.sources.documents_root,
+    )
+
+
+def registry_from_local_registrations(
+    registrations: tuple[LocalProjectRegistration, ...],
+) -> ProjectRegistry:
+    return ProjectRegistry(
+        tuple(space_from_local_registration(item) for item in registrations)
+    )
+
+
+def load_project_spaces_from_dir(directory: Path, *, base_dir: Path) -> tuple[ProjectSpace, ...]:
+    if not directory.is_dir():
+        return ()
+    spaces: list[ProjectSpace] = []
+    for path in sorted(directory.glob("*.json")):
+        spaces.append(load_project_space_json(path, base_dir=base_dir))
+    return tuple(spaces)
+
+
+def load_project_space_json(path: Path, *, base_dir: Path) -> ProjectSpace:
+    payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    tenant_id = str(payload["tenant_id"])
+    project_id = str(payload["project_id"])
+    services = tuple(str(item) for item in (payload.get("services") or ()))
+    environments = tuple(str(item) for item in (payload.get("environments") or ()))
+    project = ProjectRef(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        service=services[0] if services else None,
+        environment=environments[0] if environments else None,
+    )
+    repos: list[RepositoryRef] = []
+    for item in payload.get("repositories") or []:
+        repos.append(
+            RepositoryRef(
+                name=str(item.get("name") or payload["project_id"]),
+                path=_resolve_path(str(item["path"]), base_dir=base_dir),
+                default_branch=str(item.get("default_branch") or "main"),
+            )
+        )
+    docs = payload.get("documents_root")
+    allowlist = payload.get("file_allowlist") or ["src/", "tests/", "knowledge/"]
+    role_policies = tuple(
+        _load_role_policy(item, project=project) for item in (payload.get("role_policies") or ())
+    )
+    chat_visibility_policies = tuple(
+        _load_chat_visibility_policy(item, project=project)
+        for item in (payload.get("chat_visibility_policies") or ())
+    )
+    source_connectors = tuple(
+        _load_source_connector(item, base_dir=base_dir)
+        for item in (payload.get("source_connectors") or ())
+    )
+    feishu_chat_bindings = tuple(
+        _load_feishu_chat_binding(item)
+        for item in (payload.get("feishu_chat_bindings") or ())
+    )
+    return ProjectSpace(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        display_name=str(payload.get("display_name") or payload["project_id"]),
+        repositories=tuple(repos),
+        services=services,
+        environments=environments,
+        rag_namespace=_namespace_or_default(
+            payload,
+            "rag_namespace",
+            f"{payload['tenant_id']}:{payload['project_id']}:rag",
+        ),
+        graph_namespace=_namespace_or_default(
+            payload,
+            "graph_namespace",
+            f"{payload['tenant_id']}:{payload['project_id']}",
+        ),
+        memory_namespace=_namespace_or_default(
+            payload,
+            "memory_namespace",
+            f"{payload['tenant_id']}:{payload['project_id']}",
+        ),
+        access_scope=str(
+            payload.get("access_scope") or f"project:{payload['project_id']}:read"
+        ),
+        file_allowlist=tuple(str(item) for item in allowlist),
+        default_skill_guides=tuple(
+            str(item) for item in (payload.get("default_skill_guides") or ())
+        ),
+        role_policies=role_policies,
+        chat_visibility_policies=chat_visibility_policies,
+        documents_root=(
+            _resolve_path(str(docs), base_dir=base_dir) if docs else None
+        ),
+        source_connectors=source_connectors,
+        feishu_chat_bindings=feishu_chat_bindings,
+    )
+
+
+def _load_source_connector(
+    payload: dict[str, Any],
+    *,
+    base_dir: Path,
+) -> SourceConnectorRef:
+    raw_path = payload.get("path")
+    return SourceConnectorRef(
+        kind=str(payload["kind"]),
+        name=str(payload.get("name") or payload["kind"]),
+        path=(_resolve_path(str(raw_path), base_dir=base_dir) if raw_path else None),
+        namespace=str(payload.get("namespace") or ""),
+        metadata=dict(payload.get("metadata") or {}),
+    )
+
+
+def _load_feishu_chat_binding(payload: dict[str, Any]) -> FeishuChatBindingRef:
+    return FeishuChatBindingRef(
+        tenant_key=str(payload["tenant_key"]),
+        chat_id=str(payload["chat_id"]),
+        visibility=str(payload.get("visibility") or "team_shared"),
+    )
+
+
+def _load_role_policy(
+    payload: dict[str, Any],
+    *,
+    project: ProjectRef,
+) -> ProjectMemberRolePolicy:
+    return ProjectMemberRolePolicy(
+        actor_id=str(payload["actor_id"]),
+        project=project,
+        role=RoleKind(str(payload.get("role") or RoleKind.GUEST.value)),
+        readable_sources=tuple(str(item) for item in (payload.get("readable_sources") or ())),
+        allowed_tools=tuple(str(item) for item in (payload.get("allowed_tools") or ())),
+        forbidden_sources=tuple(str(item) for item in (payload.get("forbidden_sources") or ())),
+        answer_depth=AnswerDepth(str(payload.get("answer_depth") or AnswerDepth.BALANCED.value)),
+        answer_style=str(payload.get("answer_style") or "team"),
+        visibility_level=VisibilityLevel(
+            str(payload.get("visibility_level") or VisibilityLevel.TEAM_SHARED.value)
+        ),
+        escalation_rules=tuple(str(item) for item in (payload.get("escalation_rules") or ())),
+    )
+
+
+def _load_chat_visibility_policy(
+    payload: dict[str, Any],
+    *,
+    project: ProjectRef,
+) -> ChatVisibilityPolicy:
+    allowed_roles = tuple(
+        RoleKind(str(item)) for item in (payload.get("allowed_roles") or ())
+    )
+    raw_depth = payload.get("answer_depth")
+    return ChatVisibilityPolicy(
+        chat_id=str(payload["chat_id"]),
+        project=project,
+        visibility_level=VisibilityLevel(
+            str(payload.get("visibility_level") or VisibilityLevel.TEAM_SHARED.value)
+        ),
+        allowed_roles=allowed_roles,
+        readable_sources=tuple(str(item) for item in (payload.get("readable_sources") or ())),
+        allowed_tools=tuple(str(item) for item in (payload.get("allowed_tools") or ())),
+        forbidden_sources=tuple(str(item) for item in (payload.get("forbidden_sources") or ())),
+        answer_depth=(
+            AnswerDepth(str(raw_depth)) if raw_depth is not None else None
+        ),
+        answer_style=(
+            str(payload["answer_style"]) if payload.get("answer_style") is not None else None
+        ),
+    )
+
+
+def _resolve_path(raw: str, *, base_dir: Path) -> Path:
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return (base_dir / path).resolve()
+
+
+def _namespace_or_default(
+    payload: dict[str, Any],
+    key: str,
+    default: str,
+) -> str:
+    if key not in payload:
+        return default
+    return str(payload[key])
+
