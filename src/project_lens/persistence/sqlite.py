@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from threading import Lock
+from threading import RLock
+from collections.abc import Iterator, Callable
 from uuid import UUID, uuid4
 
 from project_lens.domain.models import AgentRun
@@ -18,7 +20,7 @@ class SQLiteDatabase:
     def __init__(self, path: str) -> None:
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
-        self._lock = Lock()
+        self._lock = RLock()
         self._connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -88,6 +90,12 @@ class SQLiteDatabase:
                 project_id TEXT NOT NULL,
                 claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                component TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                applied_at TEXT NOT NULL,
+                PRIMARY KEY (component, version)
+            );
             CREATE INDEX IF NOT EXISTS idx_risk_notifications_project
                 ON risk_notifications (tenant_id, project_id, sequence);
             """
@@ -127,6 +135,41 @@ class SQLiteDatabase:
             cursor = self._connection.execute(sql, parameters)
             self._connection.commit()
             return cursor
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Run a multi-write operation atomically under the database lock."""
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._connection
+            except Exception:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+
+    def run_migrations(
+        self,
+        component: str,
+        migrations: dict[int, Callable[[sqlite3.Connection], None]],
+    ) -> None:
+        """Apply namespaced migrations in order, each in one transaction."""
+
+        for version, migration in sorted(migrations.items()):
+            with self.transaction() as connection:
+                applied = connection.execute(
+                    "SELECT 1 FROM schema_migrations WHERE component = ? AND version = ?",
+                    (component, version),
+                ).fetchone()
+                if applied is not None:
+                    continue
+                migration(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations (component, version, applied_at) VALUES (?, ?, ?)",
+                    (component, version, datetime.now(timezone.utc).isoformat()),
+                )
 
     def query_one(self, sql: str, parameters: tuple[object, ...] = ()) -> sqlite3.Row | None:
         with self._lock:

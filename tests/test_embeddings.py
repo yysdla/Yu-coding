@@ -1,5 +1,7 @@
 from project_lens.context.embeddings import EpisodeEmbeddingScorer, MemoryEmbeddingScorer, _cosine
 from project_lens.context.embeddings import SQLiteEmbeddingCache
+from project_lens.context.embeddings import build_embedding_provider
+from project_lens.config import Settings
 from project_lens.domain.memory import MemoryType, ProjectMemory
 from project_lens.domain.models import AgentRun, ProjectRef
 from project_lens.persistence.sqlite import SQLiteDatabase
@@ -71,3 +73,17 @@ def test_embedding_cache_reuses_vectors_for_same_model_and_content() -> None:
     assert first == second
     assert provider.calls == 1
     assert cache.invalidate(project=project, kind="project_memory") >= 1
+
+
+def test_embedding_provider_can_reuse_common_openai_compatible_credentials() -> None:
+    provider = build_embedding_provider(
+        Settings(
+            _env_file=None,
+            embedding_provider="openai",
+            embedding_model="embedding-test",
+            model_openai_api_key="test-key",
+        )
+    )
+
+    assert provider is not None
+    assert provider.model_version == "embedding-test"

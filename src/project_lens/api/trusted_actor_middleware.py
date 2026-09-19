@@ -18,7 +18,13 @@ class TrustedActorTestMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: RequestResponseEndpoint,
     ) -> Response:
-        if isolation_active() and "/project-agent/" in request.url.path:
+        if isolation_active() and (
+            "/project-agent/" in request.url.path
+            or "/memories" in request.url.path
+            or "/memory-summary" in request.url.path
+            or "/memory-reviews" in request.url.path
+            or "memory-proposals" in request.url.path
+        ):
             existing = getattr(request.state, "actor_context", None)
             if existing is None:
                 actor = actor_context_from_headers(request)

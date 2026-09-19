@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from project_lens.domain.models import FrozenModel, ProjectRef
+
 
 ActorSource = Literal["feishu_event", "service_token", "test_fixture"]
 ChatType = Literal["p2p", "group"]
@@ -35,3 +37,14 @@ class ActorContext:
             raise ValueError(f"unsupported chat_type: {self.chat_type}")
         if self.source not in {"feishu_event", "service_token", "test_fixture"}:
             raise ValueError(f"unsupported actor source: {self.source}")
+
+
+class TrustedActorContext(FrozenModel):
+    """Server-resolved identity and effective scope for memory APIs."""
+
+    actor_id: str
+    project: ProjectRef
+    chat_id: str
+    scope: object
+    identity_source: str
+    policy_version: str

@@ -21,6 +21,10 @@ from project_lens.project_space.policies import (
     EffectiveAccessScope,
     effective_scope_to_audit_dict,
 )
+from project_lens.workflow.context_snapshot import (
+    ContextSnapshotService,
+    MemoryCandidate,
+)
 
 
 @dataclass(frozen=True)
@@ -60,9 +64,11 @@ class HermesRuntimeService:
         *,
         run_service: RunService,
         bridge: FeishuHermesToolLoopBridge,
+        context_snapshots: ContextSnapshotService | None = None,
     ) -> None:
         self._run_service = run_service
         self._bridge = bridge
+        self._context_snapshots = context_snapshots
 
     @property
     def run_service(self) -> RunService:
@@ -78,6 +84,7 @@ class HermesRuntimeService:
         entry_mode: str,
         context_snapshot_id: UUID | None = None,
         context: HermesProjectContext | None = None,
+        memory_candidates: tuple[MemoryCandidate, ...] = (),
     ) -> HermesExecutionResult:
         pending = self.prepare(
             project=project,
@@ -87,6 +94,7 @@ class HermesRuntimeService:
             entry_mode=entry_mode,
             context_snapshot_id=context_snapshot_id,
             context=context,
+            memory_candidates=memory_candidates,
         )
         return await self.execute_prepared(pending)
 
@@ -100,6 +108,7 @@ class HermesRuntimeService:
         entry_mode: str,
         context_snapshot_id: UUID | None = None,
         context: HermesProjectContext | None = None,
+        memory_candidates: tuple[MemoryCandidate, ...] = (),
     ) -> PendingHermesExecution:
         """Validate and persist the run before the Hermes tool loop starts."""
 
@@ -113,6 +122,25 @@ class HermesRuntimeService:
             session=None,
             runtime_access=runtime_access,
         )
+        if self._context_snapshots is not None and memory_candidates:
+            frozen = self._context_snapshots.freeze_and_start(
+                project=project,
+                scope=scope,
+                candidates=memory_candidates,
+            )
+            snapshot = frozen.snapshot
+            context_snapshot_id = snapshot.snapshot_id
+            context = build_hermes_project_context(
+                session=None,
+                memories=frozen.memories,
+                runtime_access=runtime_access,
+            )
+            hermes_context = context
+            hermes_context.audit_refs.update({
+                "context_snapshot_id": str(snapshot.snapshot_id),
+                "renderer_version": snapshot.renderer_version,
+                "snapshot_memory_ids": [str(item) for item in snapshot.included_memory_ids],
+            })
         context_hash = sha256(hermes_context.text.encode("utf-8")).hexdigest()
         loop_id = uuid4()
         run = self._run_service.create(

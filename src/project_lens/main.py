@@ -85,6 +85,17 @@ from project_lens.context.conversation_store import (
     SQLiteConversationStore,
 )
 from project_lens.context.memory_store import SQLiteMemoryStore
+from project_lens.context.memory_review_queue import SQLiteMemoryReviewQueue
+from project_lens.application.memory_review_service import MemoryReviewService
+from project_lens.application.memory_retrieval_service import MemoryRetrievalService
+from project_lens.application.unified_knowledge_retrieval import (
+    UnifiedKnowledgeRetrievalService,
+)
+from project_lens.application.knowledge_snapshot import (
+    KnowledgeDetailService,
+    KnowledgeSnapshotService,
+)
+from project_lens.workflow.context_snapshot import ContextSnapshotService
 from project_lens.context.source_store import SQLiteSourceRecordStore
 from project_lens.context.history_store import SQLiteHistoryMemoryStore
 from project_lens.context.embeddings import (
@@ -93,6 +104,8 @@ from project_lens.context.embeddings import (
     SQLiteEmbeddingCache,
     build_embedding_provider,
 )
+from project_lens.context.retrieval.config import retrieval_config_from_settings
+from project_lens.context.retrieval.vector import EvidenceVectorRetriever
 from project_lens.project_space.policies import ProjectRuntimeContextResolver
 from project_lens.project_space.registry import (
     load_project_spaces_from_dir,
@@ -160,6 +173,18 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
     )
     database = SQLiteDatabase(database_path)
     application.state.database = database
+    embedding_provider = build_embedding_provider(settings)
+    embedding_cache = SQLiteEmbeddingCache(database) if embedding_provider else None
+    retrieval_config = retrieval_config_from_settings(settings)
+    vector_retriever = (
+        EvidenceVectorRetriever(embedding_provider, cache=embedding_cache)
+        if (
+            embedding_provider is not None
+            and retrieval_config.vector_ready
+            and retrieval_config.effective_mode in {"vector", "hybrid"}
+        )
+        else None
+    )
     source_record_store = SQLiteSourceRecordStore(database)
     application.state.source_record_store = source_record_store
     wiki_draft_store = SQLiteWikiDraftStore(database)
@@ -170,6 +195,8 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         project_registrations,
         risk_engine=risk_engine,
         source_store=source_record_store,
+        retrieval_config=retrieval_config,
+        vector_retriever=vector_retriever,
     )
     application.state.context_engine = context_engine
     application.state.evidence_index = evidence_index
@@ -238,8 +265,6 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         project_registry=project_registry,
     )
     run_repository = SQLiteRunRepository(database)
-    embedding_provider = build_embedding_provider(settings)
-    embedding_cache = SQLiteEmbeddingCache(database) if embedding_provider else None
     history_store = SQLiteHistoryMemoryStore(
         database,
         vector_scorer=(
@@ -256,11 +281,51 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         history_store=history_store,
     )
     memory_store = SQLiteMemoryStore(database)
+    context_snapshot_service = ContextSnapshotService(
+        memory_store=memory_store,
+        source_store=source_record_store,
+        evidence_lookup=lambda evidence_id: next(
+            (
+                item
+                for item in evidence_index.all(include_revoked=True)
+                if item.id == evidence_id
+            ),
+            None,
+        ),
+    )
     memory_vector_scorer = (
         MemoryEmbeddingScorer(embedding_provider, cache=embedding_cache)
         if embedding_provider
         else None
     )
+    application.state.memory_retrieval_service = MemoryRetrievalService(
+        memory_store,
+        vector_scorer=memory_vector_scorer,
+    )
+    application.state.unified_knowledge_retrieval = UnifiedKnowledgeRetrievalService(
+        context_engine=context_engine,
+        memory_service=application.state.memory_retrieval_service,
+        history_store=history_store,
+        wiki_repository=obsidian_repository,
+    )
+    knowledge_detail_service = KnowledgeDetailService(
+        context_engine=context_engine,
+        source_store=source_record_store,
+        memory_service=application.state.memory_retrieval_service,
+        history_store=history_store,
+        wiki_repository=obsidian_repository,
+    )
+    application.state.knowledge_detail_service = knowledge_detail_service
+    application.state.knowledge_snapshot_service = KnowledgeSnapshotService(
+        knowledge_detail_service,
+        database=database,
+    )
+    memory_review_service = MemoryReviewService(
+        memory_store,
+        queue=SQLiteMemoryReviewQueue(database),
+    )
+    connector_sync_service.configure_memory_review_service(memory_review_service)
+    application.state.memory_review_service = memory_review_service
     project_agent_tool_service = ProjectAgentToolService(
         context_engine=context_engine,
         project_registry=project_registry,
@@ -293,6 +358,7 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
     hermes_runtime_service = HermesRuntimeService(
         run_service=run_service,
         bridge=hermes_tool_loop_bridge,
+        context_snapshots=context_snapshot_service,
     )
     project_agent_ask_service = ProjectAgentAskService(
         hermes_runtime=hermes_runtime_service,
@@ -322,6 +388,7 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
     application.state.engineering_approval_store = SQLiteEngineeringApprovalStore(database)
     application.state.hermes_execution_enabled = settings.feishu_hermes_execution_enabled
     application.state.memory_store = memory_store
+    application.state.context_snapshot_service = context_snapshot_service
     application.state.history_memory_store = history_store
     memory_approval_gateway = MemoryApprovalGateway(application.state.memory_store)
     application.state.memory_approval_gateway = memory_approval_gateway

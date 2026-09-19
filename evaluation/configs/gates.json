@@ -1,0 +1,13 @@
+{
+  "minimum_cases": 100,
+  "comparison_k": 5,
+  "thresholds": {
+    "citation_correctness": 0.95,
+    "temporal_correctness": 0.95,
+    "conflict_recall": 0.95,
+    "abstention_precision": 0.95,
+    "fallback_success_rate": 1.0,
+    "cross_scope_leakage": 0,
+    "revoked_expired_misuse": 0
+  }
+}

@@ -31,11 +31,13 @@ class ReciprocalRankFusion:
                         "score": 0.0,
                         "channels": [],
                         "ranks": {},
+                        "scores": {},
                     },
                 )
                 item["score"] += weight / (self._rank_constant + rank)
                 item["channels"].append(channel)
                 item["ranks"][channel] = rank
+                item["scores"][channel] = round(hit.score, 8)
         ordered = sorted(
             merged.values(),
             key=lambda item: (-item["score"], item["evidence"].source.source_id),
@@ -46,6 +48,7 @@ class ReciprocalRankFusion:
                 score=round(item["score"], 8),
                 channels=tuple(sorted(set(item["channels"]))),
                 channel_ranks=item["ranks"],
+                channel_scores=item["scores"],
             )
             for item in ordered[:limit]
         ]
@@ -54,4 +57,3 @@ class ReciprocalRankFusion:
 def _stable_key(hit: ChannelHit) -> str:
     evidence = hit.evidence
     return f"{evidence.source.system}:{evidence.source.source_id}:{evidence.content_hash}"
-

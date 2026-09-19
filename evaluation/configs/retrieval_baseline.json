@@ -1,0 +1,28 @@
+{
+  "schema_version": "retrieval-evaluation-config.v1",
+  "name": "knowledge-retrieval-bm25-baseline",
+  "status": "not_run",
+  "retrieval": {
+    "mode": "lexical",
+    "vector_enabled": false,
+    "max_candidates": 200,
+    "max_results": 8,
+    "fallback": true
+  },
+  "dataset": {
+    "path": "evaluation/context_dataset.json",
+    "minimum_cases_for_release_gate": 100,
+    "gold_labels": "source references in dataset"
+  },
+  "metrics": {
+    "recall_at_5": null,
+    "recall_at_10": null,
+    "mrr": null,
+    "ndcg_at_10": null,
+    "latency_p95_ms": null
+  },
+  "notes": [
+    "This file records the baseline contract only; null metrics are intentional until the evaluator is run.",
+    "Do not enable vector retrieval from this configuration until an embedding index and release gates exist."
+  ]
+}

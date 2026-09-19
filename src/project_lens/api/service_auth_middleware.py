@@ -15,6 +15,9 @@ class ServiceAuthMiddleware(BaseHTTPMiddleware):
             request.url.path.startswith(f"{prefix}/project-agent")
             or request.url.path.startswith(f"{prefix}/hermes")
             or request.url.path.startswith(f"{prefix}/release-gate")
+            or request.url.path.startswith(f"{prefix}/memory-proposals")
+            or request.url.path.startswith(f"{prefix}/projects/memory-proposals")
+            or (request.url.path.startswith(f"{prefix}/projects/") and "/memories" in request.url.path)
         )
         if protected and settings.env.strip().lower() in {"production", "pilot"}:
             configured = (settings.service_token or "").strip()

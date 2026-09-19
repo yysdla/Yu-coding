@@ -1,0 +1,4 @@
+[
+  {"id":"validity-half-open","project":{"tenant_id":"demo","project_id":"payment"},"query":"owner at boundary","as_of":"2026-06-01T00:00:00Z","relevant_memory_ids":["memory-owner-new"],"forbidden_memory_ids":["memory-owner-old"],"expected_abstention":false,"expected_conflict":false,"expected_evidence_ids":["source-owner-1"]},
+  {"id":"expired-fact","project":{"tenant_id":"demo","project_id":"payment"},"query":"expired deployment rule","as_of":"2026-09-17T00:00:00Z","relevant_memory_ids":[],"forbidden_memory_ids":["memory-expired"],"expected_abstention":true,"expected_conflict":false,"expected_evidence_ids":[]}
+]

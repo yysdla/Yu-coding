@@ -3,6 +3,14 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from project_lens.main import create_app
+from tests.conftest import project_agent_headers
+
+
+HEADERS = project_agent_headers(
+    actor_id="u1",
+    chat_id="chat-1",
+    tenant_key="demo",
+)
 
 
 def test_memory_proposal_api_requires_approval_before_memory() -> None:
@@ -22,7 +30,7 @@ def test_memory_proposal_api_requires_approval_before_memory() -> None:
     proposal = create.json()
     assert proposal["status"] == "pending"
 
-    listed_before = client.get("/api/v1/projects/demo/payment/memories")
+    listed_before = client.get("/api/v1/projects/demo/payment/memories", headers=HEADERS)
     assert listed_before.status_code == 200
     assert listed_before.json() == []
 
@@ -59,7 +67,7 @@ def test_memory_proposal_api_requires_approval_before_memory() -> None:
     assert memory["evidence_ids"] == [evidence_id]
     assert memory["valid_from"]
 
-    listed = client.get("/api/v1/projects/demo/payment/memories")
+    listed = client.get("/api/v1/projects/demo/payment/memories", headers=HEADERS)
     assert len(listed.json()) == 1
 
 

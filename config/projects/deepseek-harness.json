@@ -57,13 +57,19 @@
       "tenant_key": "feishu-demo",
       "chat_id": "oc_deepseek_harness",
       "visibility": "team_shared"
+    },
+    {
+      "tenant_key": "19004649d11cdbe0",
+      "chat_id": "oc_2a853a543e7e5b004a3a0bf15be52ff8",
+      "visibility": "team_shared"
     }
   ],
   "default_skill_guides": ["project_intro"],
   "members": [
     {"actor_id": "u1", "roles": ["developer"]},
     {"actor_id": "hermes-user", "roles": ["developer"]},
-    {"actor_id": "ou_demo_developer", "roles": ["developer"]}
+    {"actor_id": "ou_demo_developer", "roles": ["developer"]},
+    {"actor_id": "ou_287cf34ee1e60e7b44a8c562562dbe41", "roles": ["developer"]}
   ],
   "role_policies": [
     {
@@ -92,7 +98,9 @@
         "read_project_file_range",
         "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page"
       ],
       "forbidden_sources": [
         "node_modules/",
@@ -132,7 +140,9 @@
         "read_project_file_range",
         "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page"
       ],
       "forbidden_sources": [
         "node_modules/",
@@ -172,7 +182,9 @@
         "read_project_file_range",
         "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page"
       ],
       "forbidden_sources": [
         "node_modules/",
@@ -188,6 +200,34 @@
     }
   ],
   "chat_visibility_policies": [
+    {
+      "chat_id": "oc_2a853a543e7e5b004a3a0bf15be52ff8",
+      "visibility_level": "team_shared",
+      "allowed_roles": ["developer", "qa", "guest", "manager"],
+      "readable_sources": [
+        "packages/",
+        "apps/",
+        "docs/",
+        "python/",
+        "examples/",
+        "scripts/",
+        "native/",
+        "README.md",
+        "README.zh.md",
+        "AGENTS.md",
+        "BENCHMARK.md",
+        "package.json"
+      ],
+      "allowed_tools": [
+        "search_context",
+        "read_project_file",
+        "list_project_files",
+        "authorized_evidence",
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page"
+      ]
+    },
     {
       "chat_id": "oc_deepseek_harness",
       "visibility_level": "team_shared",
@@ -215,7 +255,9 @@
         "read_project_file_range",
         "query_graph",
         "authorized_evidence",
-        "list_knowledge_gaps"
+        "list_knowledge_gaps",
+        "search_wiki",
+        "read_wiki_page"
       ]
     }
   ]

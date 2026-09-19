@@ -14,7 +14,7 @@ from project_lens.agent.read_tools import (
 )
 from project_lens.context.engine import ContextEngine
 from project_lens.context.memory_store import MemoryStore
-from project_lens.context.memory_retrieval import retrieve_memories
+from project_lens.application.memory_retrieval_service import MemoryRetrievalService
 from project_lens.context.history_memory import derive_episode
 from project_lens.context.history_store import HistoryMemoryStore
 from project_lens.context.models import AccessContext
@@ -23,6 +23,7 @@ from project_lens.domain.access import AccessDeniedAnswer, access_denied_for_per
 from project_lens.domain.identity import ChatType
 from project_lens.domain.knowledge_proposal import KnowledgeProposal
 from project_lens.domain.models import Evidence, ProjectRef
+from project_lens.domain.memory import MemoryType
 from project_lens.obsidian.errors import ObsidianError
 from project_lens.project_space.policies import (
     ProjectRuntimeContextResolver,
@@ -401,6 +402,11 @@ class ProjectAgentToolService:
         self._event_sink = event_sink
         self._history_store = history_store
         self._memory_vector_scorer = memory_vector_scorer
+        self._memory_retrieval = (
+            MemoryRetrievalService(memory_store, vector_scorer=memory_vector_scorer)
+            if memory_store is not None
+            else None
+        )
         self._obsidian = obsidian_repository
         self._knowledge_operations = knowledge_operations
         self._obsidian_inbox = obsidian_inbox
@@ -951,32 +957,37 @@ class ProjectAgentToolService:
                 internal_tool_name="search_project_memory",
                 resolved=resolved,
             )
-        candidates = self._memory_store.search_memories(
-            resolved.project,
-            str(request.arguments.get("query") or ""),
-            limit=128,
-        )
+        query = str(request.arguments.get("query") or "")
         requested_types = {
             str(item).strip().casefold()
             for item in request.arguments.get("memory_types", [])
             if str(item).strip()
         }
-        requested_service = str(request.arguments.get("service") or "").strip()
-        if requested_types:
-            candidates = tuple(
-                item for item in candidates
-                if item.memory_type.value.casefold() in requested_types
+        parsed_types: list[MemoryType] = []
+        for value in requested_types:
+            try:
+                parsed_types.append(MemoryType(value))
+            except ValueError:
+                continue
+        memory_types = tuple(parsed_types)
+        if self._memory_retrieval is None:
+            return _error_envelope(
+                error_code="TOOL_NOT_CONFIGURED",
+                message="project memory search is not configured",
+                recovery="Use projectlens_search_context for current evidence.",
+                request=request,
+                tool_name=external,
+                internal_tool_name="search_project_memory",
+                resolved=resolved,
             )
-        if requested_service:
-            candidates = tuple(
-                item for item in candidates
-                if item.project.service == requested_service
-            )
-        result = retrieve_memories(
-            str(request.arguments.get("query") or ""),
-            candidates,
+        result = self._memory_retrieval.search_project_memory(
+            project=resolved.project,
+            access_scope=resolved.effective_scope,
+            actor_id=request.user_id,
+            chat_id=request.chat_id,
+            query=query,
+            memory_types=memory_types,
             limit=int(request.arguments.get("limit", 5)),
-            vector_scorer=self._memory_vector_scorer,
         )
         payload = {
             "query": result.query,
@@ -1054,12 +1065,23 @@ class ProjectAgentToolService:
                 internal_tool_name="get_memory_detail",
                 resolved=resolved,
             )
-        memory = self._memory_store.get_memory(memory_id)
-        if (
-            memory is None
-            or memory.project.tenant_id != resolved.project.tenant_id
-            or memory.project.project_id != resolved.project.project_id
-        ):
+        if self._memory_retrieval is None:
+            return _error_envelope(
+                error_code="TOOL_NOT_CONFIGURED",
+                message="project memory detail is not configured",
+                recovery="Use projectlens_search_context for current evidence.",
+                request=request,
+                tool_name=external,
+                internal_tool_name="get_memory_detail",
+                resolved=resolved,
+            )
+        try:
+            memory = self._memory_retrieval.get_memory_detail(
+                memory_id=memory_id,
+                project=resolved.project,
+                access_scope=resolved.effective_scope,
+            )
+        except KeyError:
             return _error_envelope(
                 error_code="MEMORY_NOT_FOUND",
                 message="该项目中不存在可读取的长期记忆。",
@@ -1069,13 +1091,11 @@ class ProjectAgentToolService:
                 internal_tool_name="get_memory_detail",
                 resolved=resolved,
             )
-        from datetime import datetime, timezone
-
-        if memory.valid_to is not None and memory.valid_to <= datetime.now(timezone.utc):
+        except PermissionError:
             return _error_envelope(
-                error_code="MEMORY_NOT_FOUND",
-                message="该长期记忆已失效，不能继续读取。",
-                recovery="Search current project memory again for an active replacement.",
+                error_code="MEMORY_FORBIDDEN",
+                message="当前身份无权读取该长期记忆。",
+                recovery="Retry with a memory returned for the current access scope.",
                 request=request,
                 tool_name=external,
                 internal_tool_name="get_memory_detail",

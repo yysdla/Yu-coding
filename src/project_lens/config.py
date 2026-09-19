@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     embedding_api_key: str | None = None
     embedding_base_url: str | None = None
     embedding_timeout_seconds: float = 10.0
+    # Knowledge retrieval remains lexical by default. Hybrid/vector can be
+    # enabled explicitly after the embedding endpoint is configured.
+    knowledge_retrieval_mode: str = "lexical"
+    knowledge_vector_enabled: bool = False
+    knowledge_embedding_model: str | None = None
+    knowledge_embedding_version: str | None = None
+    knowledge_chunker_version: str = "v1"
+    knowledge_max_candidates: int = 200
+    knowledge_max_results: int = 8
+    knowledge_vector_timeout_seconds: float = 10.0
+    knowledge_vector_fallback: bool = True
     # Phase 0 isolation: pytest / explicit test harness must never hit live services.
     test_mode: bool = False
     allow_external_calls: bool = False

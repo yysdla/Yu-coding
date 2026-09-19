@@ -16,6 +16,7 @@ from project_lens.context.ops.store import InMemoryOpsSignalStore
 from project_lens.context.retrieval.bm25 import BM25Retriever
 from project_lens.context.retrieval.exact import ExactCodeRetriever, parse_traceback
 from project_lens.context.retrieval.fusion import ReciprocalRankFusion
+from project_lens.context.retrieval.config import RetrievalConfig
 from project_lens.context.snapshot import build_project_snapshot
 from project_lens.context.store import EvidenceIndex
 from project_lens.context.authority import AuthorityResolution, SourceGap, detect_gaps, resolve_fact
@@ -49,6 +50,8 @@ class ContextEngine:
         ops_service: OpsQueryService | None = None,
         risk_engine: RiskEngine | None = None,
         source_store: SourceRecordStore | None = None,
+        retrieval_config: RetrievalConfig | None = None,
+        vector_retriever=None,
     ) -> None:
         self._index = index
         self._access = access_policy or EvidenceAccessPolicy()
@@ -59,6 +62,8 @@ class ContextEngine:
         self._ops = ops_service or OpsQueryService()
         self._risks = risk_engine or RiskEngine(InMemoryRiskStore())
         self._source_store = source_store
+        self._retrieval_config = retrieval_config or RetrievalConfig()
+        self._vector = vector_retriever
 
     def search(self, query: ContextQuery, access: AccessContext) -> EvidenceBundle:
         all_evidence = self._index.all()
@@ -67,9 +72,35 @@ class ContextEngine:
         search_text = _expand_query_text(query.text)
         exact_hits = self._exact.retrieve(search_text, candidates, limit=channel_limit)
         bm25_hits = self._bm25.retrieve(search_text, candidates, limit=channel_limit)
+        vector_failure: str | None = None
+        effective_mode = self._retrieval_config.for_query(
+            requested_mode=query.retrieval_mode
+        ).effective_mode
+        channels = (
+            {"vector": []}
+            if effective_mode == "vector"
+            else {"exact": exact_hits, "bm25": bm25_hits}
+        )
+        if effective_mode in {"vector", "hybrid"} and self._vector is not None:
+            try:
+                channels["vector"] = self._vector.retrieve(
+                    search_text,
+                    candidates,
+                    limit=channel_limit,
+                )
+            except Exception as exc:
+                vector_failure = type(exc).__name__
+                if not self._retrieval_config.vector_fallback:
+                    raise
+                channels = {"exact": exact_hits, "bm25": bm25_hits}
+        elif effective_mode == "vector":
+            if self._retrieval_config.vector_fallback:
+                channels = {"exact": exact_hits, "bm25": bm25_hits}
+            else:
+                channels = {"vector": []}
         hits = self._fusion.fuse(
-            {"exact": exact_hits, "bm25": bm25_hits},
-            weights={"exact": 3.0, "bm25": 1.0},
+            channels,
+            weights={"exact": 3.0, "bm25": 1.0, "vector": 1.0},
             limit=query.limit,
         )
         frames, exception = parse_traceback(query.text)
@@ -84,10 +115,37 @@ class ContextEngine:
             retrieval_trace={
                 "indexed_count": len(all_evidence),
                 "authorized_candidate_count": len(candidates),
-                "channel_counts": {"exact": len(exact_hits), "bm25": len(bm25_hits)},
+                "retrieval_mode": effective_mode,
+                "vector_enabled": self._retrieval_config.vector_ready,
+                "embedding_model": (
+                    self._retrieval_config.embedding_model
+                    if self._retrieval_config.vector_ready
+                    else None
+                ),
+                "channel_counts": {name: len(items) for name, items in channels.items()},
+                "vector_candidate_count": (
+                    len(candidates)
+                    if "vector" in channels
+                    else None
+                ),
                 "search_text": search_text,
                 "traceback_frames": len(frames),
                 "exception": exception,
+                "vector_failure": vector_failure,
+                "fallback_reason": (
+                    "vector_retrieval_failed"
+                    if vector_failure
+                    else (
+                        "vector_provider_unavailable"
+                        if effective_mode == "vector" and self._vector is None
+                        else None
+                    )
+                ),
+                **(
+                    getattr(self._vector, "last_stats", {})
+                    if self._vector is not None
+                    else {}
+                ),
             },
             warnings=tuple(warnings),
         )

@@ -36,6 +36,7 @@ class ContextQuery(FrozenModel):
     source_types: tuple[EvidenceType, ...] = ()
     time_range: TimeRange | None = None
     limit: int = Field(default=10, ge=1, le=50)
+    retrieval_mode: str | None = Field(default=None, max_length=20)
 
 
 class RetrievalHit(FrozenModel):
@@ -43,6 +44,9 @@ class RetrievalHit(FrozenModel):
     score: float = Field(ge=0)
     channels: tuple[str, ...]
     channel_ranks: dict[str, int]
+    channel_scores: dict[str, float] = Field(default_factory=dict)
+    model_version: str | None = None
+    degraded_reason: str | None = None
 
 
 class EvidenceBundle(FrozenModel):
@@ -54,4 +58,3 @@ class EvidenceBundle(FrozenModel):
     @property
     def evidence(self) -> tuple[Evidence, ...]:
         return tuple(hit.evidence for hit in self.hits)
-

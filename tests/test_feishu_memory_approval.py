@@ -16,6 +16,7 @@ from project_lens.integrations.feishu.adapter import RecordingFeishuMessenger
 from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopResult
 from project_lens.integrations.feishu.identity import parse_project_bindings
 from project_lens.main import create_app
+from tests.conftest import project_agent_headers
 from datetime import datetime, timezone
 
 
@@ -210,7 +211,10 @@ def test_feishu_card_action_approves_memory_proposal() -> None:
                 proposal_id = value.get("proposal_id")
     assert proposal_id
 
-    listed_before = client.get("/api/v1/projects/demo/payment/memories")
+    listed_before = client.get(
+        "/api/v1/projects/demo/payment/memories",
+        headers=project_agent_headers(actor_id="u1", chat_id="chat-1", tenant_key="demo"),
+    )
     assert listed_before.json() == []
 
     decide = client.post(
@@ -225,7 +229,10 @@ def test_feishu_card_action_approves_memory_proposal() -> None:
     assert decide.json()["status"] == "accepted"
     assert decide.json()["proposal_id"] == proposal_id
 
-    listed = client.get("/api/v1/projects/demo/payment/memories")
+    listed = client.get(
+        "/api/v1/projects/demo/payment/memories",
+        headers=project_agent_headers(actor_id="u1", chat_id="chat-1", tenant_key="demo"),
+    )
     assert len(listed.json()) == 1
     assert listed.json()[0]["approved_by"] == "feishu-lead"
 
@@ -262,7 +269,10 @@ def test_feishu_card_action_reject_does_not_write_memory() -> None:
         ),
     )
     assert decide.status_code == 200
-    assert client.get("/api/v1/projects/demo/payment/memories").json() == []
+    assert client.get(
+        "/api/v1/projects/demo/payment/memories",
+        headers=project_agent_headers(actor_id="u1", chat_id="chat-1", tenant_key="demo"),
+    ).json() == []
     assert "已拒绝沉淀" in str(_last_card(app))
 
 
@@ -301,4 +311,7 @@ def test_feishu_card_action_is_idempotent() -> None:
     )
     assert first.json()["status"] == "accepted"
     assert second.json()["status"] == "duplicate"
-    assert len(client.get("/api/v1/projects/demo/payment/memories").json()) == 1
+    assert len(client.get(
+        "/api/v1/projects/demo/payment/memories",
+        headers=project_agent_headers(actor_id="u1", chat_id="chat-1", tenant_key="demo"),
+    ).json()) == 1

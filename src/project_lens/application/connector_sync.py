@@ -54,11 +54,16 @@ class ConnectorSyncService:
         state_store: SyncStateStore,
         source_store: SourceRecordStore | None = None,
         freshness_max_age_seconds: int = 86_400,
+        memory_review_service=None,
     ) -> None:
         self._index = evidence_index
         self._states = state_store
         self._sources = source_store or InMemorySourceRecordStore()
         self._freshness_max_age_seconds = freshness_max_age_seconds
+        self._memory_review_service = memory_review_service
+
+    def configure_memory_review_service(self, service) -> None:
+        self._memory_review_service = service
 
     async def sync_connector(
         self,
@@ -153,6 +158,18 @@ class ConnectorSyncService:
                 error=failed.last_error,
             )
 
+        prior_revisions: dict[str, tuple[str, ...]] = {}
+        if self._memory_review_service is not None:
+            for record in batch.records:
+                prior_revisions[record.source_id] = tuple(
+                    item.revision
+                    for item in self._sources.all(
+                        tenant_id=project.tenant_id,
+                        project_id=project.project_id,
+                        include_revoked=True,
+                    )
+                    if item.source_id == record.source_id
+                )
         applied = apply_sync_batch(
             self._index,
             batch,
@@ -173,6 +190,21 @@ class ConnectorSyncService:
             failed_count=attempt.failed_count,
         )
         self._states.upsert(success)
+        if self._memory_review_service is not None:
+            for record in batch.records:
+                for old_revision in prior_revisions.get(record.source_id, ()):
+                    if old_revision != record.revision:
+                        self._memory_review_service.open_review_for_source_revision(
+                            record.source_id,
+                            old_revision,
+                            record.revision,
+                            project=project,
+                        )
+            for source_id in batch.deleted:
+                self._memory_review_service.open_review_for_source_revoked(
+                    source_id,
+                    project=project,
+                )
         warning = freshness_warning(
             success,
             max_age_seconds=self._freshness_max_age_seconds,

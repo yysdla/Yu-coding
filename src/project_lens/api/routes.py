@@ -171,6 +171,13 @@ def release_gate(request: Request) -> dict[str, object]:
         duplicate_notification_rate=getattr(request.app.state, "duplicate_notification_rate", None),
         replay_sample_count=int(getattr(request.app.state, "replay_sample_count", 0) or 0),
         pilot_days=int(getattr(request.app.state, "pilot_days", 0) or 0),
+        revoked_memory_usage=getattr(request.app.state, "revoked_memory_usage", None),
+        expired_memory_usage=getattr(request.app.state, "expired_memory_usage", None),
+        invalid_provenance=getattr(request.app.state, "invalid_provenance", None),
+        snapshot_mismatch=getattr(request.app.state, "snapshot_mismatch", None),
+        temporal_accuracy=getattr(request.app.state, "temporal_accuracy", None),
+        memory_recall_at_5=getattr(request.app.state, "memory_recall_at_5", None),
+        citation_correctness=getattr(request.app.state, "citation_correctness", None),
     )
     return {"ready": report.ready, "mode": report.mode, "checks": report.checks, "blockers": list(report.blockers), "note": "Missing measured metrics keep the service in internal technical pilot status."}
 

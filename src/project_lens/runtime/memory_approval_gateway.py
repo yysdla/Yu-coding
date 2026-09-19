@@ -86,11 +86,18 @@ class MemoryApprovalGateway:
             "engineering_apply": False,
         }
         try:
-            proposal, memory = self.store.decide_proposal(
-                proposal_id,
-                approved=approved,
-                decided_by=decided_by,
-            )
+            current = self.store.get_proposal(proposal_id)
+            if approved and current is not None and current.replaces_memory_id is not None:
+                proposal, memory, _old = self.store.approve_replacement(
+                    proposal_id,
+                    decided_by=decided_by,
+                )
+            else:
+                proposal, memory = self.store.decide_proposal(
+                    proposal_id,
+                    approved=approved,
+                    decided_by=decided_by,
+                )
         except Exception as exc:
             self._audit(
                 "decide_memory_proposal",

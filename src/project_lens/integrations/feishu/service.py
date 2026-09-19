@@ -33,6 +33,7 @@ from project_lens.application.risk_feedback_service import (
 from project_lens.application.risk_notification_service import RiskNotificationService
 from project_lens.context.memory_store import MemoryStore
 from project_lens.context.memory_retrieval import build_memory_summary
+from project_lens.context.memory_authorization import authorize_memory_candidates
 from project_lens.domain.conversation import ConversationSession
 from project_lens.domain.feishu_doc_sync import FeishuDocSyncStatus
 from project_lens.domain.memory import MemoryProposal, ProjectMemory
@@ -768,19 +769,16 @@ class FeishuEventService:
         if runtime is None:
             raise RuntimeError("Hermes runtime is not configured")
         memories: tuple[ProjectMemory, ...] = ()
-        memory_summary = None
         if session is not None and self._memory_store is not None:
-            memory_summary = self._memory_store.get_memory_summary(session.project)
-            if memory_summary is None:
-                memories = self._memory_store.list_memories(session.project)
+            memories = authorize_memory_candidates(
+                self._memory_store.list_memories(session.project),
+                project=project,
+                access_scope=scope,
+            )
         context = build_hermes_project_context(
             session=session,
             memories=memories,
-            memory_summary=(
-                memory_summary
-                if memory_summary is not None
-                else build_memory_summary(memories)
-            ),
+            memory_summary=build_memory_summary(memories),
             runtime_access={
                 "tenant_id": scope.project.tenant_id,
                 "project_id": scope.project.project_id,

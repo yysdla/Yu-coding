@@ -17,6 +17,10 @@
 | [`projectlens-tool-envelope.md`](projectlens-tool-envelope.md) | 工具与回答信封契约（实现对照） |
 | [`projectlens-obsidian-hermes-knowledge-base.md`](projectlens-obsidian-hermes-knowledge-base.md) | Obsidian 团队知识库与 Hermes 管理方案 |
 | [`projectlens-obsidian-hermes-development-plan.md`](projectlens-obsidian-hermes-development-plan.md) | Obsidian + Hermes 分阶段开发实施方案 |
+| [`projectlens-long-term-memory-architecture.md`](projectlens-long-term-memory-architecture.md) | 长期记忆架构、治理、检索与评测设计 |
+| [`projectlens-long-term-memory-development-spec.md`](projectlens-long-term-memory-development-spec.md) | 长期记忆具体开发规格、迁移、接口与测试 |
+| [`projectlens-knowledge-retrieval-vector-and-evaluation-plan.md`](projectlens-knowledge-retrieval-vector-and-evaluation-plan.md) | 知识库统一向量检索、混合召回、治理与评测门禁方案 |
+| [`projectlens-knowledge-retrieval-vector-development-plan.md`](projectlens-knowledge-retrieval-vector-development-plan.md) | 知识库向量检索分阶段开发、测试、验收、灰度与回滚计划 |
 
 ## 目标架构
 

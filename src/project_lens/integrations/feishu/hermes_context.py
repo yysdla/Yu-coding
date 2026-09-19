@@ -17,6 +17,7 @@ from project_lens.context.memory_retrieval import (
 class HermesProjectContext:
     text: str
     audit_refs: dict[str, Any]
+    renderer_version: str = "hermes_context.v1"
 
 
 def build_hermes_project_context(
@@ -91,5 +92,7 @@ def build_hermes_project_context(
             "memory_count": len(memories),
             "memory_summary_topics": len(memory_summary),
             "runtime_access_keys": sorted(runtime_access or {}),
+            "renderer_version": "hermes_context.v1",
         },
+        renderer_version="hermes_context.v1",
     )

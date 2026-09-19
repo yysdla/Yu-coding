@@ -126,6 +126,10 @@ class OpenAIEmbeddingProvider:
     def model_version(self) -> str:
         return self._model
 
+    @property
+    def dimensions(self) -> int | None:
+        return None
+
     def embed(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]:
         if not texts:
             return ()
@@ -216,6 +220,18 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
 def build_embedding_provider(settings: Settings) -> EmbeddingProvider | None:
     if settings.embedding_provider.strip().casefold() != "openai":
         return None
-    if not settings.embedding_api_key or not settings.embedding_model:
+    api_key = settings.embedding_api_key or settings.model_openai_api_key
+    model = settings.embedding_model
+    if not api_key or not model:
         return None
-    return OpenAIEmbeddingProvider(api_key=settings.embedding_api_key, model=settings.embedding_model, base_url=settings.embedding_base_url or "https://api.openai.com/v1", timeout_seconds=settings.embedding_timeout_seconds, settings=settings)
+    return OpenAIEmbeddingProvider(
+        api_key=api_key,
+        model=model,
+        base_url=(
+            settings.embedding_base_url
+            or settings.model_openai_base_url
+            or "https://api.openai.com/v1"
+        ),
+        timeout_seconds=settings.embedding_timeout_seconds,
+        settings=settings,
+    )

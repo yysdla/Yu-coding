@@ -22,6 +22,7 @@ from project_lens.context.ops.query import OpsQueryService
 from project_lens.context.ops.store import InMemoryOpsSignalStore, load_ops_signals_file
 from project_lens.context.store import InMemoryEvidenceIndex
 from project_lens.context.source_store import SourceRecordStore
+from project_lens.context.retrieval.config import RetrievalConfig
 from project_lens.application.risk_engine import RiskEngine
 from project_lens.domain.models import Evidence, ProjectRef
 from project_lens.workflow.models import ProjectRegistration
@@ -57,6 +58,8 @@ def build_local_context_engine(
     project: ProjectRef,
     access_scope: str,
     source_store: SourceRecordStore | None = None,
+    retrieval_config: RetrievalConfig | None = None,
+    vector_retriever=None,
 ) -> tuple[ContextEngine, InMemoryEvidenceIndex]:
     return build_registered_context_engine(
         (
@@ -67,6 +70,8 @@ def build_local_context_engine(
             ),
         ),
         source_store=source_store,
+        retrieval_config=retrieval_config,
+        vector_retriever=vector_retriever,
     )
 
 
@@ -75,6 +80,8 @@ def build_registered_context_engine(
     *,
     risk_engine: RiskEngine | None = None,
     source_store: SourceRecordStore | None = None,
+    retrieval_config: RetrievalConfig | None = None,
+    vector_retriever=None,
 ) -> tuple[ContextEngine, InMemoryEvidenceIndex]:
     _validate_registrations(registrations)
     index = InMemoryEvidenceIndex()
@@ -156,6 +163,8 @@ def build_registered_context_engine(
         ops_service=OpsQueryService(ops_store),
         risk_engine=risk_engine,
         source_store=source_store,
+        retrieval_config=retrieval_config,
+        vector_retriever=vector_retriever,
     ), index
 
 
