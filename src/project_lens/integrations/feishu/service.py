@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -45,6 +46,7 @@ from project_lens.integrations.feishu.cards import (
     render_about_bot_card,
     render_answer_card,
     render_collaboration_gate_card,
+    render_context_date_window_card,
     render_context_edit_card,
     render_context_more_history_card,
     render_context_preview_card,
@@ -589,6 +591,30 @@ class FeishuEventService:
                 background_tasks=background_tasks,
             )
 
+        if action_name == "context_open_date_window":
+            return self._handle_context_open_date_window(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name in {"context_set_date_start", "context_set_date_end"}:
+            option = str(action.get("option") or value.get("option") or "").strip()
+            return self._handle_context_set_date_bound(
+                value=value,
+                bound="start" if action_name.endswith("start") else "end",
+                option=option,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_clear_date_window":
+            return self._handle_context_clear_date_window(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
         if action_name in {"context_edit_placeholder", "context_more_history_placeholder"}:
             # Compat for stale cards still showing S03 placeholders.
             if action_name == "context_edit_placeholder":
@@ -1114,6 +1140,70 @@ class FeishuEventService:
         self._post_context_preview_card(target, chat_id, background_tasks)
         return FeishuCallbackResult(status="accepted")
 
+    def _handle_context_open_date_window(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        session = self._require_pending_session(value)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        self._post_context_date_window_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_set_date_bound(
+        self,
+        *,
+        value: dict[str, Any],
+        bound: str,
+        option: str,
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        session = self._require_pending_session(value)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        parsed = _parse_feishu_date_option(option, end=(bound == "end"))
+        if parsed is None:
+            raise HTTPException(status_code=400, detail="invalid date_picker option")
+        current = session.date_window
+        start = current.start if current is not None else None
+        end = current.end if current is not None else None
+        if bound == "start":
+            start = parsed
+        else:
+            end = parsed
+        if start is None and end is None:
+            raise HTTPException(status_code=400, detail="date window requires a bound")
+        if start is not None and end is not None and start > end:
+            raise HTTPException(status_code=400, detail="start must not be later than end")
+        try:
+            session = self._conversation.set_date_window(session, start=start, end=end)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        self._post_context_date_window_card(session, chat_id, background_tasks)
+        self._post_context_preview_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_clear_date_window(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        session = self._require_pending_session(value)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        session = self._conversation.clear_date_window(session)
+        return_to = str(value.get("return_to") or "preview").strip()
+        if return_to == "date_window":
+            self._post_context_date_window_card(session, chat_id, background_tasks)
+        self._post_context_preview_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
     def _require_pending_session(
         self,
         value: dict[str, Any],
@@ -1197,6 +1287,26 @@ class FeishuEventService:
             token_estimate=pending_state.token_estimate,
             branches=branches,
             active_branch_name=session.branch_name,
+            date_window_label=self._conversation.date_window_label(session),
+        )
+
+    def _post_context_date_window_card(
+        self,
+        session: ConversationSession,
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> None:
+        pending_state = session.pending_send
+        assert pending_state is not None
+        background_tasks.add_task(
+            self._messenger.post_card,
+            chat_id,
+            render_context_date_window_card(
+                question=pending_state.question,
+                session_id=session.session_id,
+                date_window_label=self._conversation.date_window_label(session),
+                token_estimate=pending_state.token_estimate,
+            ),
         )
 
     def _post_context_edit_card(
@@ -1481,3 +1591,27 @@ class FeishuEventService:
                 read_error=read_error,
             ),
         )
+
+
+def _parse_feishu_date_option(option: str, *, end: bool) -> datetime | None:
+    """Parse Feishu date_picker option (``YYYY-MM-DD`` or ``YYYY-MM-DD +0800``)."""
+
+    raw = (option or "").strip()
+    if not raw:
+        return None
+    # Drop trailing timezone offset like "+0800" / "Asia/Shanghai" when present.
+    token = raw.split()[0]
+    try:
+        if "T" in token or " " in raw and ":" in token:
+            parsed = datetime.fromisoformat(token.replace("Z", "+00:00"))
+        else:
+            parsed = datetime.fromisoformat(token)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if end and len(token) <= 10:
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+    elif not end and len(token) <= 10:
+        parsed = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+    return parsed.astimezone(timezone.utc)

@@ -47,10 +47,40 @@ class CompressedTurnRecord(FrozenModel):
 
 
 class DateWindow(FrozenModel):
-    """Optional session-level date filter. None / unset means whole pool (S07 fills UI)."""
+    """Optional session-level date filter. None / unset means whole pool (S07)."""
 
     start: datetime | None = None
     end: datetime | None = None
+
+    @model_validator(mode="after")
+    def _require_bound(self) -> DateWindow:
+        if self.start is None and self.end is None:
+            raise ValueError("DateWindow requires at least one of start/end")
+        if (
+            self.start is not None
+            and self.end is not None
+            and self.start.astimezone(timezone.utc) > self.end.astimezone(timezone.utc)
+        ):
+            raise ValueError("DateWindow.start must not be later than end")
+        return self
+
+
+def format_date_window_label(window: DateWindow | None) -> str:
+    """Human-readable date window for Feishu cards."""
+
+    if window is None:
+        return "未开窗（整池默认带入，不做剔除非今日）"
+    start = (
+        window.start.astimezone(timezone.utc).date().isoformat()
+        if window.start is not None
+        else "…"
+    )
+    end = (
+        window.end.astimezone(timezone.utc).date().isoformat()
+        if window.end is not None
+        else "…"
+    )
+    return f"{start} → {end}"
 
 
 class DefaultContextKind(StrEnum):
@@ -379,7 +409,8 @@ def enumerate_default_context_items(
 ) -> tuple[DefaultContextItem, ...]:
     """Default pending pool: compressed summaries + recent turns (no strip-non-today).
 
-    ``date_window=None`` keeps the whole pool. Filtering is a hook for S07.
+    ``date_window=None`` keeps the whole pool (no strip-non-today).
+    Callers that should honor the session window must pass ``session.date_window``.
     """
 
     items: list[DefaultContextItem] = []
@@ -488,6 +519,8 @@ def build_pending_send_items(
         wanted = {cid.strip() for cid in selected_citation_ids if cid and cid.strip()}
         for entry in session.citations:
             if entry.citation_id not in wanted:
+                continue
+            if not _in_date_window(entry.occurred_at, date_window):
                 continue
             item = pending_item_from_citation(entry)
             by_id[item.item_id] = item

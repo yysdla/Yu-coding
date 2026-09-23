@@ -788,6 +788,7 @@ def render_context_preview_card(
     token_estimate: int,
     branches: tuple[object, ...] | list[object] | None = None,
     active_branch_name: str | None = None,
+    date_window_label: str = "未开窗（整池默认带入，不做剔除非今日）",
 ) -> dict[str, object]:
     """Candidate preview: token budget + time-sorted pending list + three entries.
 
@@ -830,6 +831,7 @@ def render_context_preview_card(
         _markdown(f"**本次问题**\n{_short_question(question)}"),
         _markdown(f"**Token 预算（估算）**\n约 `{token_estimate}` tokens"),
         _markdown(f"**分支**\n{branch_status}"),
+        _markdown(f"**日期窗**\n{date_window_label}"),
         _markdown(f"**待发上下文（已按时间排序）**\n{body}"),
         _markdown(
             "预览即实发：下面「直接回答」只会带上列表里的条目与顺序，"
@@ -871,6 +873,24 @@ def render_context_preview_card(
         {
             "tag": "action",
             "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "设置日期窗"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_open_date_window",
+                        "session_id": str(session_id),
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "清空日期窗"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_clear_date_window",
+                        "session_id": str(session_id),
+                    },
+                },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "新建分支"},
@@ -1193,6 +1213,73 @@ def render_context_more_history_card(
         elements.append({"tag": "action", "actions": nav[:4]})
 
     return FeishuCard(title="ProjectLens 选择更多历史", elements=elements).to_payload()
+
+
+def render_context_date_window_card(
+    *,
+    question: str,
+    session_id: UUID,
+    date_window_label: str,
+    token_estimate: int = 0,
+) -> dict[str, object]:
+    """Session-level date window coarse filter (start/end pickers + clear)."""
+
+    elements: list[dict[str, object]] = [
+        _markdown(f"**本次问题**\n{_short_question(question)}"),
+        _markdown(f"**当前日期窗**\n{date_window_label}"),
+        _markdown(
+            "开窗后：窗外项不进入自动带入 / 预览待发 / 「更多历史」默认候选；"
+            "也不作为 `projectlens_search_project_history` 的默认 from/to。"
+            "窗外记录仍留在库中。清空日期窗即恢复整池默认。"
+        ),
+        _markdown(f"**Token 预算（当前待发）**\n约 `{token_estimate}` tokens"),
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "date_picker",
+                    "placeholder": {"tag": "plain_text", "content": "开始日期"},
+                    "value": {
+                        "action": "context_set_date_start",
+                        "session_id": str(session_id),
+                    },
+                },
+                {
+                    "tag": "date_picker",
+                    "placeholder": {"tag": "plain_text", "content": "结束日期"},
+                    "value": {
+                        "action": "context_set_date_end",
+                        "session_id": str(session_id),
+                    },
+                },
+            ],
+        },
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "清空日期窗"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_clear_date_window",
+                        "session_id": str(session_id),
+                        "return_to": "date_window",
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "返回预览"},
+                    "type": "primary",
+                    "value": {
+                        "action": "context_back_preview",
+                        "session_id": str(session_id),
+                    },
+                },
+            ],
+        },
+    ]
+    return FeishuCard(title="ProjectLens 日期窗粗筛", elements=elements).to_payload()
 
 
 def render_about_bot_card(*, user_text: str) -> dict[str, object]:
