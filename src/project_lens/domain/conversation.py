@@ -198,6 +198,16 @@ class HistoryCandidate(FrozenModel):
 HISTORY_CANDIDATE_PAGE_SIZE = 5
 
 
+class SessionBranchInfo(FrozenModel):
+    """One sibling line under the same Feishu binding (for card switch UI)."""
+
+    session_id: UUID
+    branch_name: str = Field(min_length=1, max_length=80)
+    parent_session_id: UUID | None = None
+    write_stopped: bool = False
+    is_active: bool = False
+
+
 class ConversationSession(FrozenModel):
     """Harness session spanning Feishu multi-turn collaboration."""
 
@@ -214,6 +224,10 @@ class ConversationSession(FrozenModel):
     pending_send: PendingSendState | None = None
     # Optional coarse date filter (S07 UI); S04「更多历史」reuses when set.
     date_window: DateWindow | None = None
+    # Fork tree (S06): root has parent=None; stopped lines refuse further writes.
+    parent_session_id: UUID | None = None
+    branch_name: str = Field(default="A", min_length=1, max_length=80)
+    write_stopped: bool = False
     # L3 scratchpad reserved for later Engineering/Ops process state.
     task_scratchpad: dict[str, Any] = Field(default_factory=dict)
     expires_at: datetime = Field(
@@ -227,6 +241,15 @@ class ConversationSession(FrozenModel):
     @property
     def project_ref(self) -> ProjectRef:
         return self.project
+
+    def to_branch_info(self, *, is_active: bool) -> SessionBranchInfo:
+        return SessionBranchInfo(
+            session_id=self.session_id,
+            branch_name=self.branch_name,
+            parent_session_id=self.parent_session_id,
+            write_stopped=self.write_stopped,
+            is_active=is_active,
+        )
 
 
 def empty_summary(project: ProjectRef) -> ConversationSummary:
