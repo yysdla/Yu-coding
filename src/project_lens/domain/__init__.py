@@ -18,6 +18,7 @@ from project_lens.domain.conversation import (
     list_group_message_candidates_stub,
     list_session_history_candidates,
 )
+from project_lens.domain.genai_trace import GenAITrace, GenAITraceIndexRecord, TraceEntry
 from project_lens.domain.identity import ActorContext
 from project_lens.domain.models import (
     ActionProposal,
@@ -43,6 +44,8 @@ __all__ = [
     "DefaultContextItem",
     "Evidence",
     "EvidenceRef",
+    "GenAITrace",
+    "GenAITraceIndexRecord",
     "HistoryCandidate",
     "PendingItemMark",
     "PendingSendItem",
@@ -56,6 +59,7 @@ __all__ = [
     "RiskSeverity",
     "RiskState",
     "RiskType",
+    "TraceEntry",
     "build_pending_send_items",
     "enumerate_default_context_items",
     "estimate_pending_token_budget",
