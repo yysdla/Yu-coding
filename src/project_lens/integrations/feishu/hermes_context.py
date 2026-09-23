@@ -62,8 +62,22 @@ def build_hermes_project_context(
             lines.append("session_next_actions=" + "; ".join(summary.next_actions[:12]))
         if summary.last_assistant_summary:
             lines.append("last_assistant_summary=" + summary.last_assistant_summary)
-        for index, turn in enumerate(session.recent_turns[-6:], start=1):
+        for index, turn in enumerate(session.recent_turns, start=1):
             lines.append(f"recent_turn[{index}] user_id={turn.user_id} text={turn.text}")
+        if session.summary.compressed_turn_records:
+            lines.append("compressed_turn_summaries:")
+            for index, record in enumerate(
+                session.summary.compressed_turn_records[-8:],
+                start=1,
+            ):
+                evidence = ",".join(record.evidence_ids[:12])
+                lines.append(
+                    f"compressed_turn[{index}] time="
+                    f"{record.occurred_at.isoformat()} "
+                    f"question={record.user_question[:200]} "
+                    f"answer={record.answer_summary[:200]} "
+                    f"evidence_ids={evidence}"
+                )
         # Citation ledger: metadata only; bodies via projectlens_get_citation_body.
         lines.append(format_citation_ledger_for_context(session.citations))
         if session.task_scratchpad:
