@@ -122,6 +122,7 @@ from project_lens.integrations.feishu.http_adapter import (
 from project_lens.integrations.feishu.hermes_tool_loop import FeishuHermesToolLoopBridge
 from project_lens.integrations.hermes_plugin.config import ProjectLensPluginConfig
 from project_lens.integrations.feishu.identity import parse_project_bindings
+from project_lens.integrations.feishu.messages_client import FeishuMessagesClient
 from project_lens.integrations.feishu.routes import router as feishu_router
 from project_lens.integrations.feishu.security import FeishuRequestVerifier
 from project_lens.integrations.feishu.service import FeishuEventService
@@ -541,12 +542,22 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
         ),
     )
     conversation_store = _build_conversation_store(database)
+    group_history_client = (
+        FeishuMessagesClient(
+            token_provider=token_provider,
+            base_url=settings.feishu_api_base_url,
+        )
+        if token_provider is not None
+        else None
+    )
     conversation_service = ConversationService(
         store=conversation_store,
         lifecycle=lifecycle,
+        group_history=group_history_client,
     )
     application.state.conversation_store = conversation_store
     application.state.conversation_service = conversation_service
+    application.state.feishu_messages_client = group_history_client
     project_agent_tool_service.configure_conversation_service(conversation_service)
     application.state.feishu_event_service = FeishuEventService(
         run_service=run_service,

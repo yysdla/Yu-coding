@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timezone
 from uuid import UUID
 
 from project_lens.application.audience_views import render_audience_view
@@ -1116,9 +1117,14 @@ def render_context_more_history_card(
     offset: int,
     total: int,
     page_size: int = 5,
-    group_stub_note: str = "群聊历史拉取尚未接入（S08）；当前仅会话侧引用清单。",
+    group_candidates: tuple[object, ...] | list[object] = (),
+    group_available: bool = True,
+    group_unavailable_reason: str | None = None,
+    group_page_token: str | None = None,
+    group_has_more: bool = False,
+    group_next_page_token: str | None = None,
 ) -> dict[str, object]:
-    """Paginated session-side history picker; fine-select writes citation + pending."""
+    """Paginated history picker: session-side citations + Feishu group messages."""
 
     start = max(0, int(offset)) + 1
     end = max(0, int(offset)) + len(list(candidates))
@@ -1133,13 +1139,33 @@ def render_context_more_history_card(
         lines.append(f"{index}. [{flag}] [{kind}] {stamp} · {title}")
     body = "\n".join(lines) if lines else "（当前页无会话侧历史候选）"
     range_label = f"{start}-{end}" if candidates else "0"
+
+    group_lines: list[str] = []
+    for index, raw in enumerate(group_candidates, start=1):
+        stamp_obj = getattr(raw, "occurred_at", None)
+        stamp = stamp_obj.isoformat() if stamp_obj is not None else "(no-time)"
+        title = str(getattr(raw, "short_title", "") or "")
+        selected = bool(getattr(raw, "already_in_pending", False))
+        flag = "已选" if selected else "可选"
+        group_lines.append(f"{index}. [{flag}] {stamp} · {title}")
+    if not group_available:
+        group_note = (
+            "群聊来源不可用："
+            + (group_unavailable_reason or "权限不足或机器人不在群；会话侧历史仍可用")
+        )
+        group_body = group_note
+    elif group_lines:
+        group_body = "\n".join(group_lines)
+    else:
+        group_body = "（当前页无群聊候选；可设日期窗后重试）"
+
     elements: list[dict[str, object]] = [
         _markdown(f"**本次问题**\n{_short_question(question)}"),
         _markdown(f"**Token 预算（当前待发）**\n约 `{token_estimate}` tokens"),
         _markdown(
             f"**会话侧历史（{range_label} / 共 {total}）**\n{body}"
         ),
-        _markdown(group_stub_note),
+        _markdown(f"**群聊发言**\n{group_body}"),
         {
             "tag": "action",
             "actions": [
@@ -1174,11 +1200,48 @@ def render_context_more_history_card(
                     "session_id": str(session_id),
                     "citation_id": citation_id,
                     "offset": str(max(0, int(offset))),
+                    "group_page_token": str(group_page_token or ""),
                 },
             }
         )
     if select_actions:
         elements.append({"tag": "action", "actions": select_actions[:5]})
+
+    group_actions: list[dict[str, object]] = []
+    if group_available:
+        for raw in group_candidates:
+            if bool(getattr(raw, "already_in_pending", False)):
+                continue
+            message_id = str(getattr(raw, "message_id", "") or "")
+            if not message_id:
+                continue
+            short = str(getattr(raw, "short_title", "") or message_id)[:18]
+            stamp_obj = getattr(raw, "occurred_at", None)
+            stamp = (
+                stamp_obj.astimezone(timezone.utc).isoformat()
+                if stamp_obj is not None
+                else ""
+            )
+            body_text = str(getattr(raw, "body_text", "") or "")[:500]
+            group_actions.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": f"群聊·{short}"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_select_group_message",
+                        "session_id": str(session_id),
+                        "message_id": message_id,
+                        "occurred_at": stamp,
+                        "short_title": str(getattr(raw, "short_title", "") or "")[:120],
+                        "body_text": body_text,
+                        "offset": str(max(0, int(offset))),
+                        "group_page_token": str(group_page_token or ""),
+                    },
+                }
+            )
+    if group_actions:
+        elements.append({"tag": "action", "actions": group_actions[:5]})
 
     nav: list[dict[str, object]] = []
     if offset > 0:
@@ -1186,12 +1249,13 @@ def render_context_more_history_card(
         nav.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "上一页"},
+                "text": {"tag": "plain_text", "content": "会话上一页"},
                 "type": "default",
                 "value": {
                     "action": "context_more_history",
                     "session_id": str(session_id),
                     "offset": str(prev_offset),
+                    "group_page_token": str(group_page_token or ""),
                 },
             }
         )
@@ -1200,12 +1264,41 @@ def render_context_more_history_card(
         nav.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "下一页"},
+                "text": {"tag": "plain_text", "content": "会话下一页"},
                 "type": "default",
                 "value": {
                     "action": "context_more_history",
                     "session_id": str(session_id),
                     "offset": str(next_offset),
+                    "group_page_token": str(group_page_token or ""),
+                },
+            }
+        )
+    if group_available and group_has_more and group_next_page_token:
+        nav.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "群聊下一页"},
+                "type": "default",
+                "value": {
+                    "action": "context_more_history",
+                    "session_id": str(session_id),
+                    "offset": str(max(0, int(offset))),
+                    "group_page_token": str(group_next_page_token),
+                },
+            }
+        )
+    if group_available and group_page_token:
+        nav.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "群聊首页"},
+                "type": "default",
+                "value": {
+                    "action": "context_more_history",
+                    "session_id": str(session_id),
+                    "offset": str(max(0, int(offset))),
+                    "group_page_token": "",
                 },
             }
         )

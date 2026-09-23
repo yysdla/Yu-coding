@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+from project_lens.application.group_message_gateway import GroupChatHistoryGateway
 from project_lens.context.conversation_store import ConversationStore, InMemoryConversationStore
 from project_lens.domain.conversation import (
     DEFAULT_RECENT_TURN_LIMIT,
@@ -16,6 +17,7 @@ from project_lens.domain.conversation import (
     ConversationTurn,
     DateWindow,
     DefaultContextItem,
+    GroupHistoryListResult,
     HistoryCandidate,
     PendingSendState,
     SessionBranchInfo,
@@ -26,7 +28,7 @@ from project_lens.domain.conversation import (
     exclude_pending_item_ids,
     format_citation_ledger_for_context,
     format_date_window_label,
-    list_group_message_candidates_stub,
+    group_messages_to_history_candidates,
     list_session_history_candidates,
     make_short_title,
     pending_item_from_citation,
@@ -64,12 +66,21 @@ class ConversationService:
         recent_turn_limit: int = DEFAULT_RECENT_TURN_LIMIT,
         session_ttl: timedelta = DEFAULT_SESSION_TTL,
         lifecycle: LifecycleBus | None = None,
+        group_history: GroupChatHistoryGateway | None = None,
     ) -> None:
         self._store = store or InMemoryConversationStore()
         self._rewriter = rewriter or FollowupRewriter()
         self._recent_turn_limit = max(2, recent_turn_limit)
         self._session_ttl = session_ttl
         self._lifecycle = lifecycle or LifecycleBus()
+        self._group_history = group_history
+
+    def configure_group_history(
+        self, gateway: GroupChatHistoryGateway | None
+    ) -> None:
+        """Wire Feishu IM history client after create_app assembly."""
+
+        self._group_history = gateway
 
     @property
     def store(self) -> ConversationStore:
@@ -658,17 +669,54 @@ class ConversationService:
             page_size=page_size,
         )
 
+    def list_group_history(
+        self,
+        session: ConversationSession,
+        *,
+        date_window: DateWindow | None = None,
+        page_size: int = HISTORY_CANDIDATE_PAGE_SIZE,
+        page_token: str | None = None,
+    ) -> GroupHistoryListResult:
+        """Fetch Feishu group history for「选择更多历史」; session-side stays independent."""
+
+        window = date_window if date_window is not None else session.date_window
+        gateway = self._group_history
+        if gateway is None:
+            return GroupHistoryListResult(
+                available=False,
+                unavailable_reason="群聊历史客户端未配置（无飞书凭证或未组装）",
+            )
+        page = gateway.list_chat_history(
+            chat_id=session.chat_id,
+            start_time=window.start if window is not None else None,
+            end_time=window.end if window is not None else None,
+            page_size=page_size,
+            page_token=page_token,
+        )
+        if not page.available:
+            return GroupHistoryListResult(
+                available=False,
+                unavailable_reason=page.unavailable_reason
+                or "群聊历史不可用（权限或机器人不在群）",
+            )
+        candidates = group_messages_to_history_candidates(page.items, session)
+        return GroupHistoryListResult(
+            candidates=candidates,
+            available=True,
+            has_more=page.has_more,
+            next_page_token=page.next_page_token,
+        )
+
     def list_group_history_stub(
         self,
         session: ConversationSession,
         *,
         date_window: DateWindow | None = None,
     ) -> tuple[HistoryCandidate, ...]:
-        """S08 hook — Feishu group history; empty until wired."""
+        """Compat alias — prefer list_group_history."""
 
-        return list_group_message_candidates_stub(
-            session, date_window=date_window or session.date_window
-        )
+        result = self.list_group_history(session, date_window=date_window)
+        return result.candidates
 
     def fine_select_history(
         self,
@@ -685,6 +733,55 @@ class ConversationService:
         if not any(item.citation_id == needle for item in session.citations):
             raise KeyError(f"citation not found: {needle}")
         return self.add_citations_to_pending_send(session, (needle,))
+
+    def fine_select_group_message(
+        self,
+        session: ConversationSession,
+        *,
+        message_id: str,
+        occurred_at: datetime | None = None,
+        short_title: str | None = None,
+        body_text: str | None = None,
+    ) -> ConversationSession:
+        """Fine-select a Feishu group message into citation ledger + pending-send.
+
+        Prefers body snapshot at select time; keeps message_id for later re-fetch.
+        """
+
+        if session.pending_send is None:
+            raise ValueError("pending_send is not set; call refresh_pending_send first")
+        mid = message_id.strip()
+        if not mid:
+            raise ValueError("message_id is required")
+
+        existing = next(
+            (item for item in session.citations if item.message_id == mid),
+            None,
+        )
+        if existing is not None:
+            return self.add_citations_to_pending_send(session, (existing.citation_id,))
+
+        body = (body_text or "").strip()
+        if not body and self._group_history is not None:
+            fetched = self._group_history.get_message_text(mid)
+            body = (fetched or "").strip()
+        if not body:
+            # Still pin with message_id so tools can re-fetch later.
+            body_snapshot = None
+        else:
+            body_snapshot = body[:20_000]
+
+        stamp = occurred_at or datetime.now(timezone.utc)
+        title = (short_title or "").strip() or make_short_title(body or mid)
+        entry = CitationEntry(
+            source_kind=CitationSourceKind.GROUP_MESSAGE,
+            occurred_at=stamp.astimezone(timezone.utc),
+            short_title=title,
+            message_id=mid,
+            body_snapshot=body_snapshot,
+        )
+        session = self.append_citation(session, entry)
+        return self.add_citations_to_pending_send(session, (entry.citation_id,))
 
     def clear_pending_send(self, session: ConversationSession) -> ConversationSession:
         """Drop pending-send after a confirmed send (or cancel)."""
@@ -753,6 +850,33 @@ class ConversationService:
         if entry is None:
             return None
         body = (entry.body_snapshot or "").strip()
+        if not body and entry.message_id and self._group_history is not None:
+            fetched = self._group_history.get_message_text(entry.message_id)
+            body = (fetched or "").strip()
+            if body:
+                # Persist snapshot so later tool calls work without Feishu.
+                session = self._store.get_by_binding(
+                    tenant_id=tenant_id,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    project=project,
+                )
+                if session is not None and not session.write_stopped:
+                    updated_citations = tuple(
+                        item.model_copy(update={"body_snapshot": body[:20_000]})
+                        if item.citation_id == entry.citation_id
+                        else item
+                        for item in session.citations
+                    )
+                    saved = self._store.upsert(
+                        session.model_copy(update={"citations": updated_citations})
+                    )
+                    self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+                    entry = next(
+                        item
+                        for item in saved.citations
+                        if item.citation_id == entry.citation_id
+                    )
         if not body:
             return {
                 "citation_id": entry.citation_id,
@@ -767,8 +891,10 @@ class ConversationService:
                 "file_refs": list(entry.file_refs),
                 "body_available": False,
                 "retrieval_hint": (
-                    "body_snapshot empty; use run_id/trace_id/message_id keys "
-                    "(Feishu fetch lands in S08; GenAI trace in S05)"
+                    "body_snapshot empty; Feishu re-fetch failed or unavailable "
+                    "(check im:message.group_msg / bot-in-chat)"
+                    if entry.message_id
+                    else "body_snapshot empty; use run_id/trace_id keys"
                 ),
             }
         return {

@@ -208,5 +208,5 @@ def test_more_history_card_pagination_buttons() -> None:
     )
     payload = str(card)
     assert "context_select_history" in payload
-    assert "下一页" in payload
-    assert "S08" in payload or "群聊" in payload
+    assert "会话下一页" in payload
+    assert "群聊发言" in payload
