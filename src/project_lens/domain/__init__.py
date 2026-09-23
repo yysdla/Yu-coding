@@ -6,6 +6,7 @@ from project_lens.domain.conversation import (
     ConversationSession,
     DateWindow,
     DefaultContextItem,
+    HistoryCandidate,
     PendingItemMark,
     PendingSendItem,
     PendingSendState,
@@ -14,6 +15,8 @@ from project_lens.domain.conversation import (
     estimate_pending_token_budget,
     format_citation_ledger_for_context,
     format_pending_items_for_hermes,
+    list_group_message_candidates_stub,
+    list_session_history_candidates,
 )
 from project_lens.domain.identity import ActorContext
 from project_lens.domain.models import (
@@ -40,6 +43,7 @@ __all__ = [
     "DefaultContextItem",
     "Evidence",
     "EvidenceRef",
+    "HistoryCandidate",
     "PendingItemMark",
     "PendingSendItem",
     "PendingSendState",
@@ -57,4 +61,6 @@ __all__ = [
     "estimate_pending_token_budget",
     "format_citation_ledger_for_context",
     "format_pending_items_for_hermes",
+    "list_group_message_candidates_stub",
+    "list_session_history_candidates",
 ]

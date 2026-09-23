@@ -183,6 +183,21 @@ class ConversationSummary(FrozenModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class HistoryCandidate(FrozenModel):
+    """One row on the「选择更多历史」card (session-side; group fetch is S08)."""
+
+    candidate_id: str = Field(min_length=1, max_length=200)
+    citation_id: str = Field(min_length=1, max_length=64)
+    occurred_at: datetime
+    short_title: str = Field(min_length=1, max_length=CITATION_SHORT_TITLE_MAX)
+    source_kind: str = Field(min_length=1, max_length=40)
+    already_in_pending: bool = False
+
+
+# Page size for Feishu「更多历史」lists (action-row button budget).
+HISTORY_CANDIDATE_PAGE_SIZE = 5
+
+
 class ConversationSession(FrozenModel):
     """Harness session spanning Feishu multi-turn collaboration."""
 
@@ -197,6 +212,8 @@ class ConversationSession(FrozenModel):
     summary: ConversationSummary
     # Preview == send (S03). None = legacy path has not refreshed a pending set yet.
     pending_send: PendingSendState | None = None
+    # Optional coarse date filter (S07 UI); S04「更多历史」reuses when set.
+    date_window: DateWindow | None = None
     # L3 scratchpad reserved for later Engineering/Ops process state.
     task_scratchpad: dict[str, Any] = Field(default_factory=dict)
     expires_at: datetime = Field(
@@ -506,3 +523,60 @@ def estimate_pending_token_budget(
     """Estimate tokens for the pending-send Hermes fragment."""
 
     return estimate_text_tokens(format_pending_items_for_hermes(items))
+
+
+def list_session_history_candidates(
+    session: ConversationSession,
+    *,
+    date_window: DateWindow | None = None,
+    offset: int = 0,
+    page_size: int = HISTORY_CANDIDATE_PAGE_SIZE,
+) -> tuple[tuple[HistoryCandidate, ...], int]:
+    """Session-side history for「选择更多历史」(paginated).
+
+    Uses ``date_window`` when provided, else ``session.date_window``.
+    Group-message candidates are intentionally empty until S08.
+    Returns ``(page, total_count)``.
+    """
+
+    window = date_window if date_window is not None else session.date_window
+    pending_citation_ids: set[str] = set()
+    if session.pending_send is not None:
+        pending_citation_ids = {
+            item.citation_id
+            for item in session.pending_send.items
+            if item.citation_id
+        }
+
+    rows: list[HistoryCandidate] = []
+    for entry in session.citations:
+        if not _in_date_window(entry.occurred_at, window):
+            continue
+        rows.append(
+            HistoryCandidate(
+                candidate_id=f"citation:{entry.citation_id}",
+                citation_id=entry.citation_id,
+                occurred_at=entry.occurred_at,
+                short_title=entry.short_title,
+                source_kind=entry.source_kind.value,
+                already_in_pending=entry.citation_id in pending_citation_ids,
+            )
+        )
+    # Newest first for browsing; preview/send still sorts ascending.
+    rows.sort(key=lambda item: item.occurred_at.astimezone(timezone.utc), reverse=True)
+    total = len(rows)
+    start = max(0, int(offset))
+    size = max(1, int(page_size))
+    page = tuple(rows[start : start + size])
+    return page, total
+
+
+def list_group_message_candidates_stub(
+    session: ConversationSession,
+    *,
+    date_window: DateWindow | None = None,
+) -> tuple[HistoryCandidate, ...]:
+    """S08 hook: real Feishu history fetch. Until then always empty."""
+
+    del session, date_window
+    return ()

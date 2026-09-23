@@ -45,6 +45,8 @@ from project_lens.integrations.feishu.cards import (
     render_about_bot_card,
     render_answer_card,
     render_collaboration_gate_card,
+    render_context_edit_card,
+    render_context_more_history_card,
     render_context_preview_card,
     render_failure_card,
     render_feishu_doc_sync_status_card,
@@ -536,16 +538,61 @@ class FeishuEventService:
                 background_tasks=background_tasks,
             )
 
+        if action_name == "context_edit":
+            return self._handle_context_edit(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_more_history":
+            return self._handle_context_more_history(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_back_preview":
+            return self._handle_context_back_preview(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_include_citation":
+            return self._handle_context_include_citation(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_select_history":
+            return self._handle_context_select_history(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_restore_item":
+            return self._handle_context_restore_item(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
         if action_name in {"context_edit_placeholder", "context_more_history_placeholder"}:
-            # S04 owns full edit / more-history flows; keep buttons visible in S03.
-            if chat_id:
-                background_tasks.add_task(
-                    self._messenger.post_text,
-                    chat_id,
-                    "「编辑上下文 / 选择更多历史」将在后续版本提供；"
-                    "当前可用「去掉·…」按钮剔除条目后点「直接回答」。",
+            # Compat for stale cards still showing S03 placeholders.
+            if action_name == "context_edit_placeholder":
+                return self._handle_context_edit(
+                    value={**value, "action": "context_edit"},
+                    chat_id=chat_id,
+                    background_tasks=background_tasks,
                 )
-            return FeishuCallbackResult(status="accepted")
+            return self._handle_context_more_history(
+                value={**value, "action": "context_more_history", "offset": "0"},
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
 
         if action_name == "projectlens_run_detail":
             run_id_raw = str(value.get("run_id") or "").strip()
@@ -864,6 +911,7 @@ class FeishuEventService:
 
         session_id_raw = str(value.get("session_id") or "").strip()
         item_id = str(value.get("item_id") or "").strip()
+        return_to = str(value.get("return_to") or "preview").strip() or "preview"
         if not session_id_raw or not item_id or not chat_id:
             return FeishuCallbackResult(status="ignored")
         try:
@@ -877,6 +925,188 @@ class FeishuEventService:
                 detail="pending_send missing; @ again to refresh preview",
             )
         session = self._conversation.exclude_from_pending_send(session, (item_id,))
+        if return_to == "edit":
+            self._post_context_edit_card(session, chat_id, background_tasks)
+        else:
+            self._post_context_preview_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_edit(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Open edit card: cancel defaults / join ledger citations / stub group note."""
+
+        session = self._require_pending_session(value)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        self._post_context_edit_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_more_history(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Paginated session-side history; date_window reused when set (S07)."""
+
+        session = self._require_pending_session(value)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            offset = int(str(value.get("offset") or "0"))
+        except ValueError:
+            offset = 0
+        offset = max(0, offset)
+        self._post_context_more_history_card(
+            session, chat_id, background_tasks, offset=offset
+        )
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_back_preview(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        session = self._require_pending_session(value)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        self._post_context_preview_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_include_citation(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Join a ledger citation into pending (edit card「加入」)."""
+
+        session = self._require_pending_session(value)
+        citation_id = str(value.get("citation_id") or "").strip()
+        return_to = str(value.get("return_to") or "preview").strip() or "preview"
+        if session is None or not citation_id or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            session = self._conversation.fine_select_history(session, citation_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if return_to == "edit":
+            self._post_context_edit_card(session, chat_id, background_tasks)
+        else:
+            self._post_context_preview_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_select_history(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Fine-select from「更多历史」→ citation stays on ledger, lands in pending."""
+
+        session = self._require_pending_session(value)
+        citation_id = str(value.get("citation_id") or "").strip()
+        if session is None or not citation_id or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            offset = int(str(value.get("offset") or "0"))
+        except ValueError:
+            offset = 0
+        try:
+            session = self._conversation.fine_select_history(session, citation_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # Refresh preview after select (seen = send); keep more-history open for multi-select.
+        self._post_context_more_history_card(
+            session, chat_id, background_tasks, offset=max(0, offset)
+        )
+        self._post_context_preview_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_restore_item(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Restore an excluded default/citation row into pending."""
+
+        session = self._require_pending_session(value)
+        item_id = str(value.get("item_id") or "").strip()
+        return_to = str(value.get("return_to") or "edit").strip() or "edit"
+        if session is None or not item_id or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        session = self._conversation.restore_to_pending_send(session, (item_id,))
+        if return_to == "preview":
+            self._post_context_preview_card(session, chat_id, background_tasks)
+        else:
+            self._post_context_edit_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _require_pending_session(
+        self, value: dict[str, Any]
+    ) -> ConversationSession | None:
+        session_id_raw = str(value.get("session_id") or "").strip()
+        if not session_id_raw:
+            return None
+        try:
+            session_id = UUID(session_id_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid session_id") from None
+        session = self._conversation.store.get(session_id)
+        if session is None or session.pending_send is None:
+            raise HTTPException(
+                status_code=409,
+                detail="pending_send missing; @ again to refresh preview",
+            )
+        return session
+
+    def _joinable_citations(self, session: ConversationSession) -> tuple:
+        pending_ids: set[str] = set()
+        if session.pending_send is not None:
+            pending_ids = {
+                item.citation_id
+                for item in session.pending_send.items
+                if item.citation_id
+            }
+        return tuple(
+            entry
+            for entry in session.citations
+            if entry.citation_id not in pending_ids
+        )
+
+    def _restorable_defaults(self, session: ConversationSession) -> tuple:
+        from project_lens.domain.conversation import pending_item_from_default
+
+        pending_ids = {
+            item.item_id for item in (session.pending_send.items if session.pending_send else ())
+        }
+        restored: list = []
+        for default in self._conversation.list_default_context_items(
+            session, date_window=session.date_window
+        ):
+            item = pending_item_from_default(default)
+            if item.item_id not in pending_ids:
+                restored.append(item)
+        return tuple(restored)
+
+    def _post_context_preview_card(
+        self,
+        session: ConversationSession,
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> None:
         pending_state = session.pending_send
         assert pending_state is not None
         background_tasks.add_task(
@@ -889,7 +1119,58 @@ class FeishuEventService:
                 token_estimate=pending_state.token_estimate,
             ),
         )
-        return FeishuCallbackResult(status="accepted")
+
+    def _post_context_edit_card(
+        self,
+        session: ConversationSession,
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> None:
+        pending_state = session.pending_send
+        assert pending_state is not None
+        background_tasks.add_task(
+            self._messenger.post_card,
+            chat_id,
+            render_context_edit_card(
+                question=pending_state.question,
+                session_id=session.session_id,
+                items=pending_state.items,
+                token_estimate=pending_state.token_estimate,
+                joinable_citations=self._joinable_citations(session),
+                restorable_defaults=self._restorable_defaults(session),
+            ),
+        )
+
+    def _post_context_more_history_card(
+        self,
+        session: ConversationSession,
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+        *,
+        offset: int = 0,
+    ) -> None:
+        from project_lens.domain.conversation import HISTORY_CANDIDATE_PAGE_SIZE
+
+        pending_state = session.pending_send
+        assert pending_state is not None
+        page, total = self._conversation.list_history_candidates(
+            session, offset=offset, page_size=HISTORY_CANDIDATE_PAGE_SIZE
+        )
+        # Touch S08 hook so call sites stay discoverable (always empty for now).
+        _ = self._conversation.list_group_history_stub(session)
+        background_tasks.add_task(
+            self._messenger.post_card,
+            chat_id,
+            render_context_more_history_card(
+                question=pending_state.question,
+                session_id=session.session_id,
+                candidates=page,
+                token_estimate=pending_state.token_estimate,
+                offset=offset,
+                total=total,
+                page_size=HISTORY_CANDIDATE_PAGE_SIZE,
+            ),
+        )
 
     def _prepare_hermes_execution(
         self,

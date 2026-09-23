@@ -9,12 +9,14 @@ from project_lens.context.conversation_store import ConversationStore, InMemoryC
 from project_lens.domain.conversation import (
     DEFAULT_RECENT_TURN_LIMIT,
     DEFAULT_SESSION_TTL,
+    HISTORY_CANDIDATE_PAGE_SIZE,
     CitationEntry,
     CitationSourceKind,
     ConversationSession,
     ConversationTurn,
     DateWindow,
     DefaultContextItem,
+    HistoryCandidate,
     PendingSendState,
     build_pending_send_items,
     empty_summary,
@@ -22,8 +24,11 @@ from project_lens.domain.conversation import (
     estimate_pending_token_budget,
     exclude_pending_item_ids,
     format_citation_ledger_for_context,
+    list_group_message_candidates_stub,
+    list_session_history_candidates,
     make_short_title,
     pending_item_from_citation,
+    pending_item_from_default,
     sort_pending_items,
     split_recent_turns_for_compression,
 )
@@ -303,9 +308,10 @@ class ConversationService:
                 if item.citation_id
             )
 
+        window = date_window if date_window is not None else session.date_window
         items = build_pending_send_items(
             session,
-            date_window=date_window,
+            date_window=window,
             selected_citation_ids=prior_citations or None,
         )
         q = question.strip()
@@ -358,7 +364,7 @@ class ConversationService:
         session: ConversationSession,
         citation_ids: tuple[str, ...] | list[str],
     ) -> ConversationSession:
-        """Fine-select citations into the pending set (S04 will drive UI)."""
+        """Fine-select citations into the pending set (card「选用」/「加入」)."""
 
         if session.pending_send is None:
             raise ValueError("pending_send is not set; call refresh_pending_send first")
@@ -386,6 +392,92 @@ class ConversationService:
         saved = self._store.upsert(updated)
         self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
         return saved
+
+    def restore_to_pending_send(
+        self,
+        session: ConversationSession,
+        item_ids: tuple[str, ...] | list[str],
+    ) -> ConversationSession:
+        """Re-include excluded default rows (or known citations) into pending-send."""
+
+        if session.pending_send is None:
+            raise ValueError("pending_send is not set; call refresh_pending_send first")
+        wanted = {iid.strip() for iid in item_ids if iid and str(iid).strip()}
+        if not wanted:
+            return session
+        by_id = {item.item_id: item for item in session.pending_send.items}
+        for default in enumerate_default_context_items(
+            session, date_window=session.date_window
+        ):
+            item = pending_item_from_default(default)
+            if item.item_id in wanted:
+                by_id[item.item_id] = item
+        for entry in session.citations:
+            item = pending_item_from_citation(entry)
+            if item.item_id in wanted or entry.citation_id in wanted:
+                by_id[item.item_id] = item
+        items = sort_pending_items(by_id.values())
+        state = session.pending_send.model_copy(
+            update={
+                "items": items,
+                "token_estimate": estimate_pending_token_budget(items),
+                "refreshed_at": datetime.now(timezone.utc),
+            }
+        )
+        updated = session.model_copy(
+            update={
+                "pending_send": state,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        return saved
+
+    def list_history_candidates(
+        self,
+        session: ConversationSession,
+        *,
+        offset: int = 0,
+        page_size: int = HISTORY_CANDIDATE_PAGE_SIZE,
+        date_window: DateWindow | None = None,
+    ) -> tuple[tuple[HistoryCandidate, ...], int]:
+        """Paginated session-side history for「选择更多历史」."""
+
+        return list_session_history_candidates(
+            session,
+            date_window=date_window,
+            offset=offset,
+            page_size=page_size,
+        )
+
+    def list_group_history_stub(
+        self,
+        session: ConversationSession,
+        *,
+        date_window: DateWindow | None = None,
+    ) -> tuple[HistoryCandidate, ...]:
+        """S08 hook — Feishu group history; empty until wired."""
+
+        return list_group_message_candidates_stub(
+            session, date_window=date_window or session.date_window
+        )
+
+    def fine_select_history(
+        self,
+        session: ConversationSession,
+        citation_id: str,
+    ) -> ConversationSession:
+        """Write citation into pending (already on ledger) and refresh token budget."""
+
+        if session.pending_send is None:
+            raise ValueError("pending_send is not set; call refresh_pending_send first")
+        needle = citation_id.strip()
+        if not needle:
+            raise ValueError("citation_id is required")
+        if not any(item.citation_id == needle for item in session.citations):
+            raise KeyError(f"citation not found: {needle}")
+        return self.add_citations_to_pending_send(session, (needle,))
 
     def clear_pending_send(self, session: ConversationSession) -> ConversationSession:
         """Drop pending-send after a confirmed send (or cancel)."""
