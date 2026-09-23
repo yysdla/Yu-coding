@@ -201,6 +201,65 @@ def test_project_agent_history_search_and_detail_are_bounded() -> None:
     assert detail["result"]["raw_tool_arguments_available"] is False
 
 
+def test_project_agent_history_search_defaults_to_session_date_window() -> None:
+    """S07: omitted from/to reuse active conversation date window."""
+
+    from datetime import datetime, timezone
+
+    client = _client()
+    app = client.app
+    project = ProjectRef(tenant_id="demo", project_id="payment")
+    old = app.state.run_service.create(
+        project=project,
+        user_id="u1",
+        question="old kafka lag topic",
+        channel_id="chat-1",
+    )
+    # Force old timestamps outside the window.
+    old = old.model_copy(
+        update={
+            "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        }
+    )
+    app.state.run_service._repository.add(old)  # noqa: SLF001 - test fixture
+
+    new = app.state.run_service.create(
+        project=project,
+        user_id="u1",
+        question="new kafka lag topic",
+        channel_id="chat-1",
+    )
+
+    conversation = app.state.conversation_service
+    session = conversation.get_or_create(
+        tenant_id="demo",
+        chat_id="chat-1",
+        user_id="u1",
+        project=project,
+    )
+    session = conversation.set_date_window(
+        session,
+        start=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        end=None,
+        refresh_pending=False,
+    )
+    assert session.date_window is not None
+
+    result = client.post(
+        "/api/v1/project-agent/tools/call",
+        json=_call_payload(
+            tool_name="projectlens_search_project_history",
+            arguments={"query": "kafka lag", "limit": 8},
+        ),
+        headers=_headers(actor_id="u1"),
+    ).json()
+    assert result["ok"] is True
+    run_ids = {item["run_id"] for item in result["result"]["history"]}
+    assert str(new.id) in run_ids
+    assert str(old.id) not in run_ids
+
+
 def test_project_agent_get_citation_body_is_scoped_to_binding() -> None:
     client = _client()
     app = client.app

@@ -25,6 +25,7 @@ from project_lens.domain.conversation import (
     estimate_pending_token_budget,
     exclude_pending_item_ids,
     format_citation_ledger_for_context,
+    format_date_window_label,
     list_group_message_candidates_stub,
     list_session_history_candidates,
     make_short_title,
@@ -403,6 +404,88 @@ class ConversationService:
         """
 
         return enumerate_default_context_items(session, date_window=date_window)
+
+    def set_date_window(
+        self,
+        session: ConversationSession,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        refresh_pending: bool = True,
+    ) -> ConversationSession:
+        """Write session-level date window and optionally rebuild pending-send."""
+
+        self._require_writable(session)
+        window = DateWindow(start=start, end=end)
+        updated = session.model_copy(
+            update={
+                "date_window": window,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        if refresh_pending and saved.pending_send is not None:
+            pending = saved.pending_send
+            saved = self.refresh_pending_send(
+                saved,
+                question=pending.question,
+                question_for_run=pending.question_for_run,
+                date_window=window,
+            )
+        return saved
+
+    def clear_date_window(
+        self,
+        session: ConversationSession,
+        *,
+        refresh_pending: bool = True,
+    ) -> ConversationSession:
+        """Clear date window → restore whole-pool default (no strip-non-today)."""
+
+        self._require_writable(session)
+        updated = session.model_copy(
+            update={
+                "date_window": None,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        if refresh_pending and saved.pending_send is not None:
+            pending = saved.pending_send
+            saved = self.refresh_pending_send(
+                saved,
+                question=pending.question,
+                question_for_run=pending.question_for_run,
+                date_window=None,
+            )
+        return saved
+
+    def active_date_window(
+        self,
+        *,
+        tenant_id: str,
+        chat_id: str,
+        user_id: str,
+        project: ProjectRef,
+    ) -> DateWindow | None:
+        """Return the active binding session's date window (for search defaults)."""
+
+        session = self._store.get_by_binding(
+            tenant_id=tenant_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            project=project,
+        )
+        if session is None:
+            return None
+        return session.date_window
+
+    def date_window_label(self, session: ConversationSession) -> str:
+        """Card-facing label for the current date window."""
+
+        return format_date_window_label(session.date_window)
 
     def refresh_pending_send(
         self,

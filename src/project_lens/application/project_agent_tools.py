@@ -104,7 +104,8 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "projectlens_search_project_history": (
         "Search bounded historical AgentRuns for the current project. Returns "
         "safe summaries, status, tool names, and Evidence ids; raw tool arguments "
-        "and sensitive bodies are excluded."
+        "and sensitive bodies are excluded. If from/to are omitted, defaults to the "
+        "active conversation date window when one is set."
     ),
     "projectlens_get_run_detail": (
         "Read one historical AgentRun by exact run_id after re-checking current "
@@ -178,8 +179,20 @@ _PARAMETERS: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Historical run search text"},
-            "from": {"type": "string", "description": "Optional ISO date lower bound"},
-            "to": {"type": "string", "description": "Optional ISO date upper bound"},
+            "from": {
+                "type": "string",
+                "description": (
+                    "Optional ISO date lower bound; when omitted, uses the active "
+                    "session date window start if set"
+                ),
+            },
+            "to": {
+                "type": "string",
+                "description": (
+                    "Optional ISO date upper bound; when omitted, uses the active "
+                    "session date window end if set"
+                ),
+            },
             "limit": {"type": "integer", "description": "1-8 historical summaries; server capped"},
         },
         "required": ["query"],
@@ -1201,6 +1214,27 @@ class ProjectAgentToolService:
         limit = min(max(1, int(request.arguments.get("limit", 5))), 8)
         raw_from = request.arguments.get("from")
         raw_to = request.arguments.get("to")
+        # S07: when caller omits from/to, reuse active session date window.
+        if (
+            self._conversation is not None
+            and (not isinstance(raw_from, str) or not raw_from.strip())
+            and (not isinstance(raw_to, str) or not raw_to.strip())
+        ):
+            window = self._conversation.active_date_window(
+                tenant_id=resolved.project.tenant_id,
+                chat_id=request.chat_id,
+                user_id=request.user_id,
+                project=resolved.project,
+            )
+            if window is not None:
+                if window.start is not None and (
+                    not isinstance(raw_from, str) or not raw_from.strip()
+                ):
+                    raw_from = window.start.astimezone(timezone.utc).isoformat()
+                if window.end is not None and (
+                    not isinstance(raw_to, str) or not raw_to.strip()
+                ):
+                    raw_to = window.end.astimezone(timezone.utc).isoformat()
         lower_bound = _parse_history_date(raw_from, end=False)
         upper_bound = _parse_history_date(raw_to, end=True)
         if (isinstance(raw_from, str) and raw_from.strip() and lower_bound is None) or (
