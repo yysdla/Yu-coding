@@ -266,6 +266,7 @@ def compress_overflow_into_summary(
                 evidence_ids=clipped_evidence,
                 occurred_at=turn.created_at,
                 run_id=turn.run_id,
+                compression_cycle=cycle,
             )
         )
         snippet = (turn.rewritten_question or turn.text)[:120]
@@ -301,7 +302,8 @@ def compress_overflow_into_summary(
             "active_topic": topic,
             "pinned_ids": pinned,
             "compression_cycle": cycle,
-            "compressed_turn_records": summary.compressed_turn_records + tuple(new_records),
+            # Sliding window: keep only this cycle's records (do not append forever).
+            "compressed_turn_records": tuple(new_records),
             "session_intent": intent,
             "artifact_refs": _merge_artifact_refs(
                 summary.artifact_refs,

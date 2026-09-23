@@ -19,6 +19,7 @@ from project_lens.domain.conversation import (
     format_date_window_label,
     format_pending_items_for_hermes,
     group_messages_to_history_candidates,
+    latest_compressed_turn_records,
     list_group_message_candidates_stub,
     list_session_history_candidates,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "format_date_window_label",
     "format_pending_items_for_hermes",
     "group_messages_to_history_candidates",
+    "latest_compressed_turn_records",
     "list_group_message_candidates_stub",
     "list_session_history_candidates",
 ]

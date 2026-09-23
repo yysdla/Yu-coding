@@ -9,6 +9,7 @@ from project_lens.domain.conversation import (
     ConversationSession,
     format_citation_ledger_for_context,
     format_pending_items_for_hermes,
+    latest_compressed_turn_records,
 )
 from project_lens.domain.memory import ProjectMemory
 from project_lens.context.memory_retrieval import (
@@ -90,7 +91,7 @@ def build_hermes_project_context(
             if session.summary.compressed_turn_records:
                 lines.append("compressed_turn_summaries:")
                 for index, record in enumerate(
-                    session.summary.compressed_turn_records[-8:],
+                    latest_compressed_turn_records(session.summary),
                     start=1,
                 ):
                     evidence = ",".join(record.evidence_ids[:12])

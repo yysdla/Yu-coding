@@ -196,6 +196,8 @@ def test_date_window_cards_expose_actions() -> None:
     assert "context_set_date_start" in body
     assert "context_set_date_end" in body
     assert "date_picker" in body
+    assert "确定" in body
+    assert "context_confirm_date_window" in body
 
 
 def test_parse_feishu_date_option() -> None:

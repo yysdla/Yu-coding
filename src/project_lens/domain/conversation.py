@@ -12,9 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from project_lens.domain.models import ProjectRef, utc_now
 
 DEFAULT_RECENT_TURN_LIMIT = 8
-# Mid-window compression: when pool exceeds limit, move 1-based turns 5–8 into summary.
-COMPRESS_TURN_START_1BASED = 5
-COMPRESS_TURN_END_1BASED = 8
+# Sliding window: when pool exceeds limit, compress oldest 1-based turns 1–4 into summary.
+COMPRESS_TURN_START_1BASED = 1
+COMPRESS_TURN_END_1BASED = 4
 # Answer summary + evidence ids share this budget; user question is excluded.
 COMPRESSED_ANSWER_TOKEN_BUDGET = 300
 DEFAULT_SESSION_TTL = timedelta(days=7)
@@ -30,7 +30,7 @@ class ConversationTurn(FrozenModel):
     user_id: str = Field(min_length=1, max_length=100)
     text: str = Field(min_length=1, max_length=20_000)
     rewritten_question: str | None = Field(default=None, max_length=20_000)
-    # Populated at record time so mid-window compression can keep per-turn answer+evidence.
+    # Populated at record time so sliding-window compression can keep per-turn answer+evidence.
     answer_summary: str | None = Field(default=None, max_length=4_000)
     evidence_ids: tuple[str, ...] = ()
     created_at: datetime = Field(default_factory=utc_now)
@@ -44,6 +44,8 @@ class CompressedTurnRecord(FrozenModel):
     evidence_ids: tuple[str, ...] = ()
     occurred_at: datetime = Field(default_factory=utc_now)
     run_id: UUID | None = None
+    # Which compression cycle produced this record (default pool keeps only the latest).
+    compression_cycle: int = Field(default=0, ge=0)
 
 
 class DateWindow(FrozenModel):
@@ -206,7 +208,8 @@ class ConversationSummary(FrozenModel):
     artifact_refs: tuple[str, ...] = ()
     pinned_ids: PinnedIds = Field(default_factory=PinnedIds)
     compression_cycle: int = 0
-    # Per-turn records produced by mid-window compression (S02).
+    # Latest compression cycle only (sliding window). Older cycles are dropped so
+    # the default pending pool cannot grow without bound; citations still retain history.
     compressed_turn_records: tuple[CompressedTurnRecord, ...] = ()
     session_intent: str | None = Field(default=None, max_length=500)
     last_assistant_summary: str | None = Field(default=None, max_length=500)
@@ -393,7 +396,7 @@ def split_recent_turns_for_compression(
 ) -> tuple[tuple[ConversationTurn, ...], tuple[ConversationTurn, ...]]:
     """Split (to_compress, kept) after appending a turn.
 
-    Product rule (limit >= 8): when len > 8, compress 1-based turns 5–8.
+    Product rule (limit >= 8): when len > 8, compress oldest 1-based turns 1–4.
     Smaller custom limits keep legacy FIFO overflow for existing unit tests.
     """
 
@@ -402,8 +405,8 @@ def split_recent_turns_for_compression(
     start = compress_start_1based - 1
     end = compress_end_1based
     if (
-        recent_turn_limit >= compress_end_1based
-        and len(recent) > end
+        recent_turn_limit >= DEFAULT_RECENT_TURN_LIMIT
+        and end <= len(recent)
         and 0 <= start < end
     ):
         return recent[start:end], recent[:start] + recent[end:]
@@ -421,33 +424,70 @@ def _in_date_window(occurred_at: datetime, date_window: DateWindow | None) -> bo
     return True
 
 
+def latest_compressed_turn_records(
+    summary: ConversationSummary,
+) -> tuple[CompressedTurnRecord, ...]:
+    """Records from the newest compression cycle only (bounded sliding summary)."""
+
+    records = summary.compressed_turn_records
+    if not records:
+        return ()
+    tagged = [item for item in records if int(item.compression_cycle or 0) > 0]
+    if tagged:
+        latest = max(int(item.compression_cycle) for item in tagged)
+        return tuple(item for item in tagged if int(item.compression_cycle) == latest)
+    # Legacy payloads without cycle tags: keep only the last compression batch size.
+    batch = COMPRESS_TURN_END_1BASED - COMPRESS_TURN_START_1BASED + 1
+    return tuple(records[-batch:])
+
+
+def latest_summary_default_item(
+    summary: ConversationSummary,
+) -> DefaultContextItem | None:
+    """Roll the latest compression cycle into one default-pool summary row."""
+
+    records = latest_compressed_turn_records(summary)
+    if not records:
+        return None
+    questions = [record.user_question for record in records]
+    answers = [record.answer_summary for record in records if record.answer_summary]
+    evidence_ids = tuple(
+        dict.fromkeys(
+            evidence_id for record in records for evidence_id in record.evidence_ids
+        )
+    )
+    short_bits = [make_short_title(question, max_len=28) for question in questions[:4]]
+    label = f"[summary] 最近压缩（{len(records)}轮）: " + " / ".join(short_bits)
+    if len(label) > 500:
+        label = label[:497] + "..."
+    return DefaultContextItem(
+        kind=DefaultContextKind.SUMMARY,
+        occurred_at=min(record.occurred_at for record in records),
+        label=label,
+        run_id=records[-1].run_id,
+        evidence_ids=evidence_ids[:40],
+        user_question="\n".join(f"- {question}" for question in questions)[:20_000],
+        answer_summary="\n".join(answers)[:4_000] if answers else None,
+    )
+
+
 def enumerate_default_context_items(
     session: ConversationSession,
     *,
     date_window: DateWindow | None = None,
 ) -> tuple[DefaultContextItem, ...]:
-    """Default pending pool: compressed summaries + recent turns (no strip-non-today).
+    """Default pending pool: one latest-summary row + recent turns.
 
-    ``date_window=None`` keeps the whole pool (no strip-non-today).
-    Callers that should honor the session window must pass ``session.date_window``.
+    Older compression cycles are excluded so the default selection stays bounded.
+    ``date_window=None`` does not strip by calendar day.
     """
 
     items: list[DefaultContextItem] = []
-    for record in session.summary.compressed_turn_records:
-        if not _in_date_window(record.occurred_at, date_window):
-            continue
-        label = make_short_title(record.user_question, max_len=80)
-        items.append(
-            DefaultContextItem(
-                kind=DefaultContextKind.SUMMARY,
-                occurred_at=record.occurred_at,
-                label=f"[summary] {label}",
-                run_id=record.run_id,
-                evidence_ids=record.evidence_ids,
-                user_question=record.user_question,
-                answer_summary=record.answer_summary,
-            )
-        )
+    summary_item = latest_summary_default_item(session.summary)
+    if summary_item is not None and _in_date_window(
+        summary_item.occurred_at, date_window
+    ):
+        items.append(summary_item)
     for turn in session.recent_turns:
         if not _in_date_window(turn.created_at, date_window):
             continue
@@ -462,15 +502,18 @@ def enumerate_default_context_items(
                 answer_summary=turn.answer_summary,
             )
         )
+    # Preview == send: ascending by occurred_at (oldest / compressed summary first).
     items.sort(key=lambda item: item.occurred_at.astimezone(timezone.utc))
     return tuple(items)
 
 
 def _pending_item_id_for_default(item: DefaultContextItem) -> str:
     stamp = item.occurred_at.astimezone(timezone.utc).isoformat()
+    if item.kind == DefaultContextKind.SUMMARY:
+        # One stable row per compression batch (collapsed latest summary).
+        return f"summary:latest:{stamp}"
     rid = str(item.run_id) if item.run_id is not None else "norun"
-    prefix = "summary" if item.kind == DefaultContextKind.SUMMARY else "turn"
-    return f"{prefix}:{rid}:{stamp}"
+    return f"turn:{rid}:{stamp}"
 
 
 def pending_item_from_default(item: DefaultContextItem) -> PendingSendItem:
@@ -524,10 +567,7 @@ def build_pending_send_items(
     date_window: DateWindow | None = None,
     selected_citation_ids: tuple[str, ...] | frozenset[str] | None = None,
 ) -> tuple[PendingSendItem, ...]:
-    """Build time-sorted pending set: defaults + optional fine-selected citations.
-
-    Items without ``occurred_at`` cannot be constructed (field is required).
-    """
+    """Build time-sorted pending set: latest summary + recent turns + optional citations."""
 
     by_id: dict[str, PendingSendItem] = {}
     for default in enumerate_default_context_items(session, date_window=date_window):
@@ -578,16 +618,17 @@ def format_pending_items_for_hermes(
         elif item.source_kind == "summary":
             evidence = ",".join(item.evidence_ids[:12])
             question = (item.user_question or item.label)[:200]
-            answer = (item.answer_summary or "")[:200]
+            answer = (item.answer_summary or "").strip()
             lines.append(
                 f"pending[{index}] mark={mark} time={stamp} kind=summary "
                 f"question={question} answer={answer} evidence_ids={evidence}"
             )
         else:
-            text = (item.user_question or item.label)[:500]
+            question = (item.user_question or item.label)[:500]
+            answer = (item.answer_summary or "").strip()
             lines.append(
                 f"pending[{index}] mark={mark} time={stamp} "
-                f"kind=recent_turn text={text}"
+                f"kind=recent_turn question={question} answer={answer}"
             )
     return "\n".join(lines)
 

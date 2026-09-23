@@ -1,4 +1,4 @@
-"""S02: sliding window (8 turns) + mid-window compress (turns 5–8) + whole-pool default."""
+"""S02: sliding window (8 turns) + compress oldest turns 1–4 + whole-pool default."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def test_default_recent_turn_limit_is_eight() -> None:
     assert DEFAULT_RECENT_TURN_LIMIT == 8
 
 
-def test_ninth_turn_compresses_turns_5_through_8() -> None:
+def test_ninth_turn_compresses_oldest_turns_1_through_4() -> None:
     service = ConversationService()
     session = service.get_or_create(
         tenant_id="demo",
@@ -89,19 +89,20 @@ def test_ninth_turn_compresses_turns_5_through_8() -> None:
     assert len(session.recent_turns) == 5
     kept_texts = [turn.text for turn in session.recent_turns]
     assert kept_texts == [
-        "question-0",
-        "question-1",
-        "question-2",
-        "question-3",
-        "question-8",
-    ]
-    records = session.summary.compressed_turn_records
-    assert len(records) == 4
-    assert [item.user_question for item in records] == [
         "question-4",
         "question-5",
         "question-6",
         "question-7",
+        "question-8",
+    ]
+    records = session.summary.compressed_turn_records
+    assert len(records) == 4
+    assert all(item.compression_cycle == 1 for item in records)
+    assert [item.user_question for item in records] == [
+        "question-0",
+        "question-1",
+        "question-2",
+        "question-3",
     ]
     for record in records:
         budget_used = estimate_text_tokens(record.answer_summary) + estimate_text_tokens(
@@ -111,6 +112,77 @@ def test_ninth_turn_compresses_turns_5_through_8() -> None:
         assert budget_used <= COMPRESSED_ANSWER_TOKEN_BUDGET
         assert record.answer_summary
         assert record.evidence_ids
+
+    # Default pool = one collapsed latest-summary row + recent turns, time-sorted.
+    defaults = service.list_default_context_items(session)
+    summary_items = [item for item in defaults if item.kind == DefaultContextKind.SUMMARY]
+    recent_items = [item for item in defaults if item.kind == DefaultContextKind.RECENT_TURN]
+    assert len(summary_items) == 1
+    assert len(recent_items) == 5
+    assert summary_items[0].label.startswith("[summary] 最近压缩（4轮）")
+    assert "question-0" in (summary_items[0].user_question or "")
+    assert "question-3" in (summary_items[0].user_question or "")
+    # Oldest compressed summary sits at the top under ascending time order.
+    assert defaults[0].kind == DefaultContextKind.SUMMARY
+    stamps = [item.occurred_at for item in defaults]
+    assert stamps == sorted(stamps)
+
+
+def test_second_compression_keeps_only_latest_summary_batch() -> None:
+    """Sliding window: older summary cycles must not stay in the default pool."""
+
+    service = ConversationService()
+    session = service.get_or_create(
+        tenant_id="demo",
+        chat_id="chat-cycle-2",
+        user_id="user-1",
+        project=_project(),
+    )
+    # 9 turns → cycle 1 compresses oldest questions 0–3.
+    for index in range(9):
+        session = service.record_turn(
+            session,
+            user_id="user-1",
+            text=f"question-{index}",
+            rewritten_question=None,
+            run_id=uuid4(),
+            answer=_answer(business_summary=f"answer-{index}"),
+        )
+    assert session.summary.compression_cycle == 1
+    first_batch = {item.user_question for item in session.summary.compressed_turn_records}
+    assert first_batch == {"question-0", "question-1", "question-2", "question-3"}
+
+    # Grow past 8 again → cycle 2 replaces the summary batch.
+    for index in range(9, 13):
+        session = service.record_turn(
+            session,
+            user_id="user-1",
+            text=f"question-{index}",
+            rewritten_question=None,
+            run_id=uuid4(),
+            answer=_answer(business_summary=f"answer-{index}"),
+        )
+    assert session.summary.compression_cycle == 2
+    records = session.summary.compressed_turn_records
+    assert len(records) == 4
+    assert all(item.compression_cycle == 2 for item in records)
+    assert first_batch.isdisjoint({item.user_question for item in records})
+    assert {item.user_question for item in records} == {
+        "question-4",
+        "question-5",
+        "question-6",
+        "question-7",
+    }
+
+    defaults = service.list_default_context_items(session)
+    summary_items = [item for item in defaults if item.kind == DefaultContextKind.SUMMARY]
+    assert len(summary_items) == 1
+    summary_text = summary_items[0].user_question or ""
+    for old in first_batch:
+        assert old not in summary_text
+    for question in {item.user_question for item in records}:
+        assert question in summary_text
+    assert defaults[0].kind == DefaultContextKind.SUMMARY
 
 
 def test_answer_evidence_budget_clips_answer_first() -> None:
@@ -187,9 +259,9 @@ def test_compressed_turn_still_retrievable_via_citation_tool() -> None:
         user_id="user-1",
         project=_project(),
     )
-    target_body = "第5轮用户原文，压缩后仍须可按引用取回。"
+    target_body = "第1轮用户原文，压缩后仍须可按引用取回。"
     for index in range(9):
-        text = target_body if index == 4 else f"question-{index}"
+        text = target_body if index == 0 else f"question-{index}"
         session = service.record_turn(
             session,
             user_id="user-1",

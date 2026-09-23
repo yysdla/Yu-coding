@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import timezone
 from uuid import UUID
 
@@ -31,9 +33,12 @@ from project_lens.integrations.feishu.role_views import render_role_view_element
 from project_lens.integrations.feishu.role_views import render_audience_view_elements
 from project_lens.integrations.feishu.views import (
     AnswerView,
+    DEGRADED_ANSWER_TITLE,
     answer_view_title,
     confidence_status_label,
+    degraded_answer_banner,
     human_evidence_label,
+    is_degraded_answer,
     is_evidence_insufficient,
     select_answer_view,
 )
@@ -207,8 +212,14 @@ def render_answer_card(
     if debug_on and selected_audience != AnswerAudience.DEBUG:
         elements.append(_markdown(summary.to_debug_markdown()))
 
+    degraded = is_degraded_answer(answer)
+    if degraded:
+        elements = [_markdown(degraded_answer_banner()), *elements]
+
     title = answer_view_title(view)
-    if audience is not None and selected_audience != AnswerAudience.TEAM:
+    if degraded:
+        title = DEGRADED_ANSWER_TITLE
+    elif audience is not None and selected_audience != AnswerAudience.TEAM:
         title = f"{title} · {audience_label(selected_audience)}"
 
     return FeishuCard(
@@ -395,6 +406,26 @@ def _short_question(question: str, *, limit: int = 200) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
+
+
+# Card preview only: keep bot-reply teaser short so Feishu cards stay readable.
+_PENDING_ANSWER_PREVIEW_LIMIT = 48
+# Feishu interactive markdown treats mid-line ``##`` / fences as structure and
+# may blank the whole pending-list element; strip those before the teaser.
+_PENDING_MARKDOWN_HEADING = re.compile(r"#{1,6}\s+")
+_PENDING_MARKDOWN_FENCE = re.compile(r"`{3,}")
+
+
+def _pending_answer_preview(
+    answer: str,
+    *,
+    limit: int = _PENDING_ANSWER_PREVIEW_LIMIT,
+) -> str:
+    """Short plain teaser for pending-send cards (safe for Feishu markdown)."""
+
+    text = _PENDING_MARKDOWN_FENCE.sub("", answer)
+    text = _PENDING_MARKDOWN_HEADING.sub("", text)
+    return _short_question(text, limit=limit)
 
 
 def _key_conclusions_block(answer: ProjectAnswer, *, view: AnswerView) -> str | None:
@@ -686,11 +717,12 @@ def render_failure_card(run: AgentRun) -> dict[str, object]:
         for marker in ("502", "429", "503", "504", "api", "gateway", "rate limit")
     )
     heading = "模型调用失败" if model_failure else "ProjectLens 处理失败"
-    detail = (
-        f"模型服务暂时不可用，未能完成这次回答。\n原因：{error[:400]}"
-        if model_failure and error
-        else "这次我没能完成项目资料核对。"
-    )
+    if model_failure and error:
+        detail = f"模型服务暂时不可用，未能完成这次回答。\n原因：{error[:400]}"
+    elif error:
+        detail = f"这次我没能完成项目资料核对。\n原因：{error[:400]}"
+    else:
+        detail = "这次我没能完成项目资料核对。"
     return FeishuCard(
         title=heading,
         elements=[
@@ -701,6 +733,97 @@ def render_failure_card(run: AgentRun) -> dict[str, object]:
             _run_detail_actions(run.id),
         ],
     ).to_payload()
+
+
+def format_failure_as_text(run: AgentRun) -> str:
+    """Plain-text failure reply (no interactive card)."""
+
+    error = (run.error or "").strip()
+    model_failure = "模型调用失败" in error or any(
+        marker in error.casefold()
+        for marker in ("502", "429", "503", "504", "api", "gateway", "rate limit")
+    )
+    heading = (
+        "【降级标注】模型调用失败（非 Hermes 完整结论）"
+        if model_failure
+        else "【降级标注】ProjectLens 处理失败（非 Hermes 完整结论）"
+    )
+    if model_failure and error:
+        detail = f"模型服务暂时不可用，未能完成这次回答。\n原因：{error[:400]}"
+    elif error:
+        detail = f"这次我没能完成项目资料核对。\n原因：{error[:400]}"
+    else:
+        detail = "这次我没能完成项目资料核对。"
+    return f"{heading}\n{detail}\n你可以稍后重试，或者把问题缩小到某个服务、文件或接口。"
+
+
+def format_answer_as_text(
+    run: AgentRun,
+    answer: ProjectAnswer,
+    *,
+    memory_proposal: MemoryProposal | None = None,
+    audience: AnswerAudience | None = None,
+) -> str:
+    """Render the answer body as plain text for Feishu ``msg_type=text`` replies."""
+
+    card = render_answer_card(
+        run,
+        answer,
+        memory_proposal=None,  # buttons not available in text; note below
+        show_debug_audit=False,
+        audience=audience,
+    )
+    chunks = _markdown_chunks_from_card(card)
+    title = ""
+    header = card.get("header") if isinstance(card.get("header"), dict) else {}
+    title_obj = header.get("title") if isinstance(header, dict) else None
+    if isinstance(title_obj, dict):
+        title = str(title_obj.get("content") or "").strip()
+    parts: list[str] = []
+    if title:
+        parts.append(title)
+    parts.extend(chunks)
+    if memory_proposal is not None:
+        parts.append(
+            "（已生成记忆沉淀提案；可在后续管理入口确认，群内文本回复不含审批按钮。）"
+        )
+    return "\n\n".join(part for part in parts if part).strip() or "（无正文）"
+
+
+def _markdown_chunks_from_card(card: dict[str, object]) -> list[str]:
+    elements = card.get("elements")
+    if not isinstance(elements, list):
+        return []
+    chunks: list[str] = []
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        tag = str(element.get("tag") or "")
+        if tag == "markdown":
+            content = str(element.get("content") or "").strip()
+            if content:
+                chunks.append(content)
+        elif tag == "div":
+            text_obj = element.get("text")
+            if isinstance(text_obj, dict):
+                content = str(text_obj.get("content") or "").strip()
+                if content:
+                    chunks.append(content)
+    return chunks
+
+
+def card_payload_as_text(card: dict[str, object]) -> str:
+    """Flatten a Feishu card payload into plain text (drops buttons)."""
+
+    chunks = _markdown_chunks_from_card(card)
+    header = card.get("header") if isinstance(card.get("header"), dict) else {}
+    title = ""
+    if isinstance(header, dict):
+        title_obj = header.get("title")
+        if isinstance(title_obj, dict):
+            title = str(title_obj.get("content") or "").strip()
+    parts = [title, *chunks] if title else list(chunks)
+    return "\n\n".join(part for part in parts if part).strip() or "（无正文）"
 
 
 def render_run_detail_card(detail: dict[str, object]) -> dict[str, object]:
@@ -807,11 +930,18 @@ def render_context_preview_card(
         stamp = occurred.isoformat() if occurred is not None else "(no-time)"
         label = str(getattr(raw, "label", "") or "")
         item_id = str(getattr(raw, "item_id", "") or "")
-        lines.append(f"{index}. [{mark_label}] {stamp} · {label}")
-        if item_id:
-            lines.append(f"   id=`{item_id}`")
-
-    body = "\n".join(lines) if lines else "（待发集合为空：本次不会带入历史轮次/摘要）"
+        answer_raw = str(getattr(raw, "answer_summary", "") or "").strip()
+        row = f"{index}. [{mark_label}] {stamp} · {label}"
+        if answer_raw:
+            preview = _pending_answer_preview(answer_raw)
+            row += f"\n   回复：{preview}"
+        row += f"\n   id=`{item_id}`"
+        lines.append(row)
+    body = (
+        "\n".join(lines)
+        if lines
+        else "（待发集合为空：本次不会带入历史轮次/摘要）"
+    )
     branch_rows = list(branches or ())
     if active_branch_name:
         branch_status = f"当前分支：`{active_branch_name}`"
@@ -835,8 +965,9 @@ def render_context_preview_card(
         _markdown(f"**日期窗**\n{date_window_label}"),
         _markdown(f"**待发上下文（已按时间排序）**\n{body}"),
         _markdown(
-            "预览即实发：下面「直接回答」只会带上列表里的条目与顺序，"
-            "不会再追加未展示的最近轮次。"
+            "超过 8 轮后，最旧的第 1～4 轮会压成摘要并按原时间排在列表最上；"
+            "近几轮按时间接在后面。列表上的「回复」仅为短预览，实发会带完整回答摘要。"
+            "预览即实发：下面「直接回答」只带列表里的条目与顺序。"
         ),
         {
             "tag": "action",
@@ -961,8 +1092,15 @@ def render_context_edit_card(
     token_estimate: int,
     joinable_citations: tuple[object, ...] | list[object] = (),
     restorable_defaults: tuple[object, ...] | list[object] = (),
+    staged_exclude_ids: tuple[str, ...] | list[str] | set[str] = (),
+    staged_restore_ids: tuple[str, ...] | list[str] | set[str] = (),
+    staged_join_citation_ids: tuple[str, ...] | list[str] | set[str] = (),
 ) -> dict[str, object]:
-    """Edit context: exclude pending rows, re-include defaults, join ledger citations."""
+    """Edit context: toggle selections (color change), apply on 「确定」."""
+
+    staged_exclude = {str(item) for item in staged_exclude_ids}
+    staged_restore = {str(item) for item in staged_restore_ids}
+    staged_join = {str(item) for item in staged_join_citation_ids}
 
     pending_lines: list[str] = []
     for index, raw in enumerate(items, start=1):
@@ -972,7 +1110,9 @@ def render_context_edit_card(
         occurred = getattr(raw, "occurred_at", None)
         stamp = occurred.isoformat() if occurred is not None else "(no-time)"
         label = str(getattr(raw, "label", "") or "")
-        pending_lines.append(f"{index}. [{mark_label}] {stamp} · {label}")
+        item_id = str(getattr(raw, "item_id", "") or "")
+        flag = "将去掉" if item_id in staged_exclude else "保留"
+        pending_lines.append(f"{index}. [{flag}] [{mark_label}] {stamp} · {label}")
 
     pending_body = (
         "\n".join(pending_lines) if pending_lines else "（当前待发为空）"
@@ -987,7 +1127,10 @@ def render_context_edit_card(
             or ""
         )
         cid = str(getattr(raw, "citation_id", "") or "")
-        join_lines.append(f"- {stamp} · {title}" + (f" (`{cid}`)" if cid else ""))
+        flag = "将加入" if cid in staged_join else "可选"
+        join_lines.append(
+            f"- [{flag}] {stamp} · {title}" + (f" (`{cid}`)" if cid else "")
+        )
     join_body = (
         "\n".join(join_lines)
         if join_lines
@@ -998,30 +1141,38 @@ def render_context_edit_card(
         stamp_obj = getattr(raw, "occurred_at", None)
         stamp = stamp_obj.isoformat() if stamp_obj is not None else "(no-time)"
         label = str(getattr(raw, "label", "") or "")
-        restore_lines.append(f"- {stamp} · {label}")
+        item_id = str(getattr(raw, "item_id", "") or "")
+        flag = "将恢复" if item_id in staged_restore else "已去掉"
+        restore_lines.append(f"- [{flag}] {stamp} · {label}")
     restore_body = (
         "\n".join(restore_lines) if restore_lines else "（无已去掉的默认项）"
     )
+    staged_count = len(staged_exclude) + len(staged_restore) + len(staged_join)
 
     elements: list[dict[str, object]] = [
         _markdown(f"**本次问题**\n{_short_question(question)}"),
         _markdown(f"**Token 预算（估算）**\n约 `{token_estimate}` tokens"),
-        _markdown(f"**当前待发（可取消勾选）**\n{pending_body}"),
+        _markdown(
+            f"**勾选变更（未点确定前不生效）**\n"
+            f"已勾选 `{staged_count}` 项。"
+            "红色=将去掉，蓝色=将加入/恢复；再点一次可取消勾选。"
+        ),
+        _markdown(f"**当前待发**\n{pending_body}"),
         _markdown(f"**已去掉的默认项（可恢复）**\n{restore_body}"),
         _markdown(f"**可加入的引用**\n{join_body}"),
         _markdown(
-            "群聊消息细选将在后续版本接飞书历史拉取；"
-            "当前可取消默认项，或加入会话侧引用清单中的条目。"
+            "勾选完成后点「确定」写回预览；「返回预览」放弃本次勾选。"
+            "需要从会话侧或群聊细选时，用「选择更多历史」。"
         ),
         {
             "tag": "action",
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "返回预览"},
+                    "text": {"tag": "plain_text", "content": "确定"},
                     "type": "primary",
                     "value": {
-                        "action": "context_back_preview",
+                        "action": "context_confirm_edit",
                         "session_id": str(session_id),
                     },
                 },
@@ -1035,6 +1186,15 @@ def render_context_edit_card(
                         "offset": "0",
                     },
                 },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "返回预览"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_back_preview",
+                        "session_id": str(session_id),
+                    },
+                },
             ],
         },
     ]
@@ -1044,12 +1204,16 @@ def render_context_edit_card(
         item_id = str(getattr(raw, "item_id", "") or "")
         if not item_id:
             continue
-        short = str(getattr(raw, "label", "") or item_id)[:18]
+        short = str(getattr(raw, "label", "") or item_id)[:16]
+        selected = item_id in staged_exclude
         exclude_actions.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": f"去掉·{short}"},
-                "type": "default",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (f"已选去掉·{short}" if selected else f"去掉·{short}"),
+                },
+                "type": "danger" if selected else "default",
                 "value": {
                     "action": "context_exclude_item",
                     "session_id": str(session_id),
@@ -1066,12 +1230,16 @@ def render_context_edit_card(
         item_id = str(getattr(raw, "item_id", "") or "")
         if not item_id:
             continue
-        short = str(getattr(raw, "label", "") or item_id)[:18]
+        short = str(getattr(raw, "label", "") or item_id)[:16]
+        selected = item_id in staged_restore
         restore_actions.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": f"恢复·{short}"},
-                "type": "default",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (f"已选恢复·{short}" if selected else f"恢复·{short}"),
+                },
+                "type": "primary" if selected else "default",
                 "value": {
                     "action": "context_restore_item",
                     "session_id": str(session_id),
@@ -1088,12 +1256,16 @@ def render_context_edit_card(
         citation_id = str(getattr(raw, "citation_id", "") or "")
         if not citation_id:
             continue
-        short = str(getattr(raw, "short_title", "") or citation_id)[:18]
+        short = str(getattr(raw, "short_title", "") or citation_id)[:16]
+        selected = citation_id in staged_join
         join_actions.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": f"加入·{short}"},
-                "type": "default",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (f"已选加入·{short}" if selected else f"加入·{short}"),
+                },
+                "type": "primary" if selected else "default",
                 "value": {
                     "action": "context_include_citation",
                     "session_id": str(session_id),
@@ -1106,6 +1278,29 @@ def render_context_edit_card(
         elements.append({"tag": "action", "actions": join_actions[:5]})
 
     return FeishuCard(title="ProjectLens 编辑上下文", elements=elements).to_payload()
+
+
+def encode_group_page_stack(stack: tuple[str, ...] | list[str]) -> str:
+    """Serialize prior group page-request tokens for card button values."""
+
+    return json.dumps([str(item) for item in stack], ensure_ascii=False)
+
+
+def decode_group_page_stack(raw: object) -> tuple[str, ...]:
+    """Parse group page-token stack from a card action value."""
+
+    if raw is None:
+        return ()
+    text = str(raw).strip()
+    if not text:
+        return ()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(item) for item in parsed)
 
 
 def render_context_more_history_card(
@@ -1121,6 +1316,8 @@ def render_context_more_history_card(
     group_available: bool = True,
     group_unavailable_reason: str | None = None,
     group_page_token: str | None = None,
+    group_page_stack: tuple[str, ...] | list[str] = (),
+    group_item_offset: int = 0,
     group_has_more: bool = False,
     group_next_page_token: str | None = None,
 ) -> dict[str, object]:
@@ -1140,8 +1337,11 @@ def render_context_more_history_card(
     body = "\n".join(lines) if lines else "（当前页无会话侧历史候选）"
     range_label = f"{start}-{end}" if candidates else "0"
 
+    group_list = list(group_candidates)
+    group_start = max(0, int(group_item_offset)) + 1
+    group_end = max(0, int(group_item_offset)) + len(group_list)
     group_lines: list[str] = []
-    for index, raw in enumerate(group_candidates, start=1):
+    for index, raw in enumerate(group_list, start=group_start):
         stamp_obj = getattr(raw, "occurred_at", None)
         stamp = stamp_obj.isoformat() if stamp_obj is not None else "(no-time)"
         title = str(getattr(raw, "short_title", "") or "")
@@ -1154,10 +1354,22 @@ def render_context_more_history_card(
             + (group_unavailable_reason or "权限不足或机器人不在群；会话侧历史仍可用")
         )
         group_body = group_note
+        group_range_label = "不可用"
     elif group_lines:
         group_body = "\n".join(group_lines)
+        group_range_label = f"{group_start}-{group_end}"
     else:
         group_body = "（当前页无群聊候选；可设日期窗后重试）"
+        group_range_label = "0"
+
+    stack = tuple(str(item) for item in group_page_stack)
+    stack_encoded = encode_group_page_stack(stack)
+    current_group_token = str(group_page_token or "")
+    group_nav_base = {
+        "action": "context_more_history",
+        "session_id": str(session_id),
+        "offset": str(max(0, int(offset))),
+    }
 
     elements: list[dict[str, object]] = [
         _markdown(f"**本次问题**\n{_short_question(question)}"),
@@ -1165,14 +1377,23 @@ def render_context_more_history_card(
         _markdown(
             f"**会话侧历史（{range_label} / 共 {total}）**\n{body}"
         ),
-        _markdown(f"**群聊发言**\n{group_body}"),
+        _markdown(f"**群聊发言（{group_range_label}）**\n{group_body}"),
         {
             "tag": "action",
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "返回预览"},
+                    "text": {"tag": "plain_text", "content": "确定"},
                     "type": "primary",
+                    "value": {
+                        "action": "context_back_preview",
+                        "session_id": str(session_id),
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "返回预览"},
+                    "type": "default",
                     "value": {
                         "action": "context_back_preview",
                         "session_id": str(session_id),
@@ -1200,7 +1421,9 @@ def render_context_more_history_card(
                     "session_id": str(session_id),
                     "citation_id": citation_id,
                     "offset": str(max(0, int(offset))),
-                    "group_page_token": str(group_page_token or ""),
+                    "group_page_token": current_group_token,
+                    "group_page_stack": stack_encoded,
+                    "group_item_offset": str(max(0, int(group_item_offset))),
                 },
             }
         )
@@ -1209,7 +1432,7 @@ def render_context_more_history_card(
 
     group_actions: list[dict[str, object]] = []
     if group_available:
-        for raw in group_candidates:
+        for raw in group_list:
             if bool(getattr(raw, "already_in_pending", False)):
                 continue
             message_id = str(getattr(raw, "message_id", "") or "")
@@ -1236,7 +1459,9 @@ def render_context_more_history_card(
                         "short_title": str(getattr(raw, "short_title", "") or "")[:120],
                         "body_text": body_text,
                         "offset": str(max(0, int(offset))),
-                        "group_page_token": str(group_page_token or ""),
+                        "group_page_token": current_group_token,
+                        "group_page_stack": stack_encoded,
+                        "group_item_offset": str(max(0, int(group_item_offset))),
                     },
                 }
             )
@@ -1252,10 +1477,11 @@ def render_context_more_history_card(
                 "text": {"tag": "plain_text", "content": "会话上一页"},
                 "type": "default",
                 "value": {
-                    "action": "context_more_history",
-                    "session_id": str(session_id),
+                    **group_nav_base,
                     "offset": str(prev_offset),
-                    "group_page_token": str(group_page_token or ""),
+                    "group_page_token": current_group_token,
+                    "group_page_stack": stack_encoded,
+                    "group_item_offset": str(max(0, int(group_item_offset))),
                 },
             }
         )
@@ -1267,43 +1493,49 @@ def render_context_more_history_card(
                 "text": {"tag": "plain_text", "content": "会话下一页"},
                 "type": "default",
                 "value": {
-                    "action": "context_more_history",
-                    "session_id": str(session_id),
+                    **group_nav_base,
                     "offset": str(next_offset),
-                    "group_page_token": str(group_page_token or ""),
+                    "group_page_token": current_group_token,
+                    "group_page_stack": stack_encoded,
+                    "group_item_offset": str(max(0, int(group_item_offset))),
+                },
+            }
+        )
+    if group_available and stack:
+        prev_token = stack[-1]
+        prev_stack = stack[:-1]
+        prev_item_offset = max(0, int(group_item_offset) - int(page_size))
+        nav.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "群聊上一页"},
+                "type": "default",
+                "value": {
+                    **group_nav_base,
+                    "group_page_token": prev_token,
+                    "group_page_stack": encode_group_page_stack(prev_stack),
+                    "group_item_offset": str(prev_item_offset),
                 },
             }
         )
     if group_available and group_has_more and group_next_page_token:
+        next_stack = stack + (current_group_token,)
+        next_item_offset = max(0, int(group_item_offset)) + len(group_list)
         nav.append(
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "群聊下一页"},
                 "type": "default",
                 "value": {
-                    "action": "context_more_history",
-                    "session_id": str(session_id),
-                    "offset": str(max(0, int(offset))),
+                    **group_nav_base,
                     "group_page_token": str(group_next_page_token),
-                },
-            }
-        )
-    if group_available and group_page_token:
-        nav.append(
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "群聊首页"},
-                "type": "default",
-                "value": {
-                    "action": "context_more_history",
-                    "session_id": str(session_id),
-                    "offset": str(max(0, int(offset))),
-                    "group_page_token": "",
+                    "group_page_stack": encode_group_page_stack(next_stack),
+                    "group_item_offset": str(next_item_offset),
                 },
             }
         )
     if nav:
-        elements.append({"tag": "action", "actions": nav[:4]})
+        elements.append({"tag": "action", "actions": nav[:5]})
 
     return FeishuCard(title="ProjectLens 选择更多历史", elements=elements).to_payload()
 
@@ -1321,6 +1553,7 @@ def render_context_date_window_card(
         _markdown(f"**本次问题**\n{_short_question(question)}"),
         _markdown(f"**当前日期窗**\n{date_window_label}"),
         _markdown(
+            "先选开始/结束日期（可只选一侧；选完不会跳转），再点「确定」进入「选择更多历史」细选。"
             "开窗后：窗外项不进入自动带入 / 预览待发 / 「更多历史」默认候选；"
             "也不作为 `projectlens_search_project_history` 的默认 from/to。"
             "窗外记录仍留在库中。清空日期窗即恢复整池默认。"
@@ -1352,6 +1585,15 @@ def render_context_date_window_card(
             "actions": [
                 {
                     "tag": "button",
+                    "text": {"tag": "plain_text", "content": "确定"},
+                    "type": "primary",
+                    "value": {
+                        "action": "context_confirm_date_window",
+                        "session_id": str(session_id),
+                    },
+                },
+                {
+                    "tag": "button",
                     "text": {"tag": "plain_text", "content": "清空日期窗"},
                     "type": "default",
                     "value": {
@@ -1363,7 +1605,7 @@ def render_context_date_window_card(
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "返回预览"},
-                    "type": "primary",
+                    "type": "default",
                     "value": {
                         "action": "context_back_preview",
                         "session_id": str(session_id),

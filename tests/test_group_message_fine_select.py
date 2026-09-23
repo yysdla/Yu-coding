@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -272,16 +273,69 @@ def test_more_history_card_shows_group_select_actions() -> None:
         group_available=True,
         group_has_more=True,
         group_next_page_token="next",
+        group_page_stack=("",),
+        group_item_offset=5,
     )
     payload = str(card)
-    assert "群聊发言" in payload
+    assert "群聊发言（6-6）" in payload
+    assert "6. [可选]" in payload
     assert "context_select_group_message" in payload
     assert "om_card" in payload
     assert "群聊下一页" in payload
+    assert "群聊上一页" in payload
+    assert "群聊首页" not in payload
     assert "S08" not in payload
 
 
-def test_feishu_messages_client_parses_list_and_permission_error() -> None:
+def test_feishu_messages_client_skips_interactive_cards() -> None:
+    class _Token:
+        def get(self) -> str:
+            return "t"
+
+    stamp_ms = str(int(datetime(2026, 9, 22, tzinfo=timezone.utc).timestamp() * 1000))
+    transport = _RecordingTransport(
+        [
+            (
+                200,
+                {
+                    "code": 0,
+                    "data": {
+                        "has_more": False,
+                        "items": [
+                            {
+                                "message_id": "om_card",
+                                "create_time": stamp_ms,
+                                "msg_type": "interactive",
+                                "body": {
+                                    "content": json.dumps(
+                                        {"title": "ProjectLens 选择更多历史"},
+                                        ensure_ascii=False,
+                                    )
+                                },
+                                "sender": {"id": "bot"},
+                            },
+                            {
+                                "message_id": "om_text",
+                                "create_time": stamp_ms,
+                                "msg_type": "text",
+                                "body": {"content": '{"text":"真人发言"}'},
+                                "sender": {"id": "ou_1"},
+                            },
+                        ],
+                    },
+                },
+            )
+        ]
+    )
+    client = FeishuMessagesClient(
+        token_provider=_Token(),  # type: ignore[arg-type]
+        transport=transport,
+    )
+    page = client.list_chat_history(chat_id="oc_1", page_size=5)
+    assert page.available is True
+    assert [item.message_id for item in page.items] == ["om_text"]
+    assert page.items[0].text == "真人发言"
+
     class _Token:
         def get(self) -> str:
             return "t"

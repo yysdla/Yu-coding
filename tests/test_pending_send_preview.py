@@ -14,9 +14,46 @@ from project_lens.domain.conversation import (
     estimate_pending_token_budget,
     format_pending_items_for_hermes,
 )
-from project_lens.domain.models import ProjectRef
+from project_lens.domain.models import (
+    Claim,
+    ClaimType,
+    Evidence,
+    EvidenceGrade,
+    EvidenceType,
+    ProjectAnswer,
+    ProjectRef,
+    SourceRef,
+)
 from project_lens.integrations.feishu.cards import render_context_preview_card
 from project_lens.integrations.feishu.hermes_context import build_hermes_project_context
+
+
+def _answer(*, business_summary: str) -> ProjectAnswer:
+    evidence = Evidence(
+        type=EvidenceType.DOCUMENT,
+        project=_project(),
+        source=SourceRef(system="local", source_id="fixture"),
+        content="证据",
+        observed_at=datetime.now(timezone.utc),
+        access_scope="project:payment:read",
+        content_hash="1234567890abcdefaa",
+    )
+    claim = Claim(
+        text="fact",
+        type=ClaimType.FACT,
+        evidence_ids=(evidence.id,),
+        grade=EvidenceGrade.B,
+    )
+    return ProjectAnswer(
+        project=_project(),
+        skill="incident_diagnosis",
+        confidence=0.7,
+        status="partial",
+        business_summary=business_summary,
+        technical_summary="tech",
+        claims=(claim,),
+        evidence=(evidence,),
+    )
 
 
 def _project() -> ProjectRef:
@@ -166,3 +203,79 @@ def test_build_pending_rejects_nothing_without_time_field() -> None:
     assert items
     assert all(item.occurred_at is not None for item in items)
     assert estimate_pending_token_budget(items) == estimate_pending_token_budget(items)
+
+
+def test_recent_turn_sends_bot_answer_but_card_only_shows_short_preview() -> None:
+    service = ConversationService()
+    session = service.get_or_create(
+        tenant_id="demo",
+        chat_id="chat-answer",
+        user_id="user-1",
+        project=_project(),
+    )
+    long_answer = "完整结论前缀-" + ("详" * 80) + "-唯一后缀XYZ"
+    session = service.record_turn(
+        session,
+        user_id="user-1",
+        text="支付超时怎么排查",
+        rewritten_question=None,
+        run_id=uuid4(),
+        answer=_answer(business_summary=long_answer),
+    )
+    session = service.refresh_pending_send(session, question="继续")
+    assert session.pending_send is not None
+    item = session.pending_send.items[0]
+    assert item.answer_summary == long_answer
+
+    hermes = format_pending_items_for_hermes(session.pending_send.items)
+    assert "kind=recent_turn" in hermes
+    assert f"answer={long_answer}" in hermes
+    assert "唯一后缀XYZ" in hermes
+
+    card = render_context_preview_card(
+        question=session.pending_send.question,
+        session_id=session.session_id,
+        items=session.pending_send.items,
+        token_estimate=session.pending_send.token_estimate,
+    )
+    payload = str(card)
+    assert "回复：" in payload
+    assert "完整结论前缀-" in payload
+    assert "唯一后缀XYZ" not in payload
+    assert "…" in payload
+
+
+def test_preview_card_strips_markdown_headings_from_answer_teaser() -> None:
+    """Feishu cards blank when pending teaser still contains mid-line ``##``."""
+
+    service = ConversationService()
+    session = service.get_or_create(
+        tenant_id="demo",
+        chat_id="chat-md",
+        user_id="user-1",
+        project=_project(),
+    )
+    messy = (
+        "已通过 ProjectLens 只读工具取到可引用证据。以下是基于这些引用的介绍。\n\n"
+        "## ⚠️ 取证过程说明（先说限制）\n- 根目录不可读"
+    )
+    session = service.record_turn(
+        session,
+        user_id="user-1",
+        text="介绍一下项目",
+        rewritten_question=None,
+        run_id=uuid4(),
+        answer=_answer(business_summary=messy),
+    )
+    session = service.refresh_pending_send(session, question="继续")
+    assert session.pending_send is not None
+    card = render_context_preview_card(
+        question=session.pending_send.question,
+        session_id=session.session_id,
+        items=session.pending_send.items,
+        token_estimate=session.pending_send.token_estimate,
+    )
+    payload = str(card)
+    assert "回复：" in payload
+    assert "已通过 ProjectLens" in payload
+    assert "##" not in payload

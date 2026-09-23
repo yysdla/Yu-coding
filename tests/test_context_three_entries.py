@@ -99,11 +99,54 @@ def test_edit_exclude_default_then_send_omits_item() -> None:
             if pending_item_from_default(d).item_id == victim.item_id
         ),
     )
-    assert "恢复·" in str(edit) or "已去掉的默认项" in str(edit)
+    edit_body = str(edit)
+    assert "恢复·" in edit_body or "已去掉的默认项" in edit_body
+    assert "确定" in edit_body
+    assert "context_confirm_edit" in edit_body
+    assert "去掉·" in edit_body or "context_exclude_item" in edit_body
 
     context = build_hermes_project_context(session=session, use_pending_send=True)
     assert victim.item_id not in context.audit_refs["pending_item_ids"]
     assert victim_text not in context.text
+
+
+def test_edit_card_wires_confirm_before_preview() -> None:
+    """Edit card must expose 「确定」and staged selection styling."""
+
+    card = render_context_edit_card(
+        question="q",
+        session_id=uuid4(),
+        items=(),
+        token_estimate=0,
+    )
+    body = str(card)
+    assert "确定" in body
+    assert "context_confirm_edit" in body
+    assert "未点确定前不生效" in body
+
+
+def test_edit_card_selected_exclude_uses_danger_style() -> None:
+    item = type(
+        "Item",
+        (),
+        {
+            "mark": "default",
+            "occurred_at": None,
+            "label": "seed-question-0",
+            "item_id": "turn:1",
+        },
+    )()
+    card = render_context_edit_card(
+        question="q",
+        session_id=uuid4(),
+        items=(item,),
+        token_estimate=1,
+        staged_exclude_ids=("turn:1",),
+    )
+    body = str(card)
+    assert "已选去掉·" in body
+    assert "danger" in body
+    assert "将去掉" in body
 
 
 def test_edit_restore_excluded_default() -> None:
@@ -116,6 +159,24 @@ def test_edit_restore_excluded_default() -> None:
     session = service.restore_to_pending_send(session, (victim.item_id,))
     assert victim.item_id in {item.item_id for item in session.pending_send.items}  # type: ignore[union-attr]
     assert len(session.pending_send.items) == 2  # type: ignore[union-attr]
+
+
+def test_context_edit_stage_toggle_then_apply() -> None:
+    service = ConversationService()
+    session = _seed_turns(service, count=3, chat_id="chat-s04-stage")
+    session = service.refresh_pending_send(session, question="部署？")
+    assert session.pending_send is not None
+    victim = session.pending_send.items[1]
+    before = {item.item_id for item in session.pending_send.items}
+
+    session = service.toggle_context_edit_exclude(session, victim.item_id)
+    assert victim.item_id in service.get_context_edit_stage(session)["exclude_ids"]
+    # Pending unchanged until apply.
+    assert {item.item_id for item in session.pending_send.items} == before
+
+    session = service.apply_context_edit_stage(session)
+    assert victim.item_id not in {item.item_id for item in session.pending_send.items}
+    assert service.get_context_edit_stage(session)["exclude_ids"] == ()
 
 
 def test_more_history_select_lands_in_citation_pending_and_preview() -> None:

@@ -575,6 +575,120 @@ class ConversationService:
         self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
         return saved
 
+    _CONTEXT_EDIT_STAGE_KEY = "context_edit_stage"
+
+    def get_context_edit_stage(self, session: ConversationSession) -> dict[str, tuple[str, ...]]:
+        """Staged toggles for the edit-context card (applied only on 「确定」)."""
+
+        raw = session.task_scratchpad.get(self._CONTEXT_EDIT_STAGE_KEY) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+
+        def _ids(key: str) -> tuple[str, ...]:
+            values = raw.get(key) or ()
+            if not isinstance(values, (list, tuple)):
+                return ()
+            return tuple(str(item).strip() for item in values if str(item).strip())
+
+        return {
+            "exclude_ids": _ids("exclude_ids"),
+            "restore_ids": _ids("restore_ids"),
+            "join_citation_ids": _ids("join_citation_ids"),
+        }
+
+    def clear_context_edit_stage(self, session: ConversationSession) -> ConversationSession:
+        scratch = dict(session.task_scratchpad)
+        scratch.pop(self._CONTEXT_EDIT_STAGE_KEY, None)
+        updated = session.model_copy(
+            update={
+                "task_scratchpad": scratch,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        return self._store.upsert(updated)
+
+    def _save_context_edit_stage(
+        self,
+        session: ConversationSession,
+        stage: dict[str, tuple[str, ...]],
+    ) -> ConversationSession:
+        scratch = {
+            **session.task_scratchpad,
+            self._CONTEXT_EDIT_STAGE_KEY: {
+                "exclude_ids": list(stage.get("exclude_ids") or ()),
+                "restore_ids": list(stage.get("restore_ids") or ()),
+                "join_citation_ids": list(stage.get("join_citation_ids") or ()),
+            },
+        }
+        updated = session.model_copy(
+            update={
+                "task_scratchpad": scratch,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        return self._store.upsert(updated)
+
+    def toggle_context_edit_exclude(
+        self, session: ConversationSession, item_id: str
+    ) -> ConversationSession:
+        needle = item_id.strip()
+        if not needle:
+            return session
+        stage = self.get_context_edit_stage(session)
+        selected = set(stage["exclude_ids"])
+        if needle in selected:
+            selected.remove(needle)
+        else:
+            selected.add(needle)
+        return self._save_context_edit_stage(
+            session, {**stage, "exclude_ids": tuple(sorted(selected))}
+        )
+
+    def toggle_context_edit_restore(
+        self, session: ConversationSession, item_id: str
+    ) -> ConversationSession:
+        needle = item_id.strip()
+        if not needle:
+            return session
+        stage = self.get_context_edit_stage(session)
+        selected = set(stage["restore_ids"])
+        if needle in selected:
+            selected.remove(needle)
+        else:
+            selected.add(needle)
+        return self._save_context_edit_stage(
+            session, {**stage, "restore_ids": tuple(sorted(selected))}
+        )
+
+    def toggle_context_edit_join(
+        self, session: ConversationSession, citation_id: str
+    ) -> ConversationSession:
+        needle = citation_id.strip()
+        if not needle:
+            return session
+        stage = self.get_context_edit_stage(session)
+        selected = set(stage["join_citation_ids"])
+        if needle in selected:
+            selected.remove(needle)
+        else:
+            selected.add(needle)
+        return self._save_context_edit_stage(
+            session, {**stage, "join_citation_ids": tuple(sorted(selected))}
+        )
+
+    def apply_context_edit_stage(self, session: ConversationSession) -> ConversationSession:
+        """Commit staged exclude / restore / join, then clear the stage."""
+
+        self._require_writable(session)
+        stage = self.get_context_edit_stage(session)
+        if stage["exclude_ids"]:
+            session = self.exclude_from_pending_send(session, stage["exclude_ids"])
+        if stage["restore_ids"]:
+            session = self.restore_to_pending_send(session, stage["restore_ids"])
+        if stage["join_citation_ids"]:
+            session = self.add_citations_to_pending_send(session, stage["join_citation_ids"])
+        return self.clear_context_edit_stage(session)
+
     def add_citations_to_pending_send(
         self,
         session: ConversationSession,

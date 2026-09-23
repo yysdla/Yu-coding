@@ -93,6 +93,8 @@ class FeishuMessagesClient:
         for raw in raw_items:
             if not isinstance(raw, dict):
                 continue
+            if _is_non_citable_message(raw):
+                continue
             parsed = _parse_message(raw)
             if parsed is not None:
                 messages.append(parsed)
@@ -177,6 +179,22 @@ class FeishuMessagesApiError(RuntimeError):
 
     def user_message(self) -> str:
         return f"feishu_im_unavailable code={self.code} msg={self.msg}"
+
+
+# Interactive cards / shares are not useful as citation bodies for fine-select.
+_NON_CITABLE_MSG_TYPES = frozenset(
+    {
+        "interactive",
+        "share_chat",
+        "share_user",
+        "system",
+    }
+)
+
+
+def _is_non_citable_message(raw: dict[str, Any]) -> bool:
+    msg_type = str(raw.get("msg_type") or "").strip().lower()
+    return msg_type in _NON_CITABLE_MSG_TYPES
 
 
 def _parse_message(raw: dict[str, Any]) -> GroupChatMessage | None:
