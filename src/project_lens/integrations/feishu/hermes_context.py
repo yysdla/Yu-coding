@@ -8,6 +8,7 @@ from typing import Any
 from project_lens.domain.conversation import (
     ConversationSession,
     format_citation_ledger_for_context,
+    format_pending_items_for_hermes,
 )
 from project_lens.domain.memory import ProjectMemory
 from project_lens.context.memory_retrieval import (
@@ -29,8 +30,14 @@ def build_hermes_project_context(
     memories: tuple[ProjectMemory, ...] = (),
     memory_summary: tuple[MemorySummaryEntry, ...] = (),
     runtime_access: dict[str, object] | None = None,
+    use_pending_send: bool | None = None,
 ) -> HermesProjectContext:
-    """Render bounded session/project memory already filtered by the caller."""
+    """Render bounded session/project memory already filtered by the caller.
+
+    When ``use_pending_send`` is True (or None and session.pending_send is set),
+    conversation history is **only** the pending-send set (preview == send).
+    Legacy full-session dump remains for callers that have not refreshed pending.
+    """
 
     lines = [
         "ProjectLens context is authoritative only within the supplied scope.",
@@ -47,9 +54,20 @@ def build_hermes_project_context(
             if key in runtime_access
         }
         lines.append("runtime_access=" + repr(safe_access))
+
+    pending_mode = False
     if session is None:
         lines.append("session=(none)")
     else:
+        pending_mode = (
+            use_pending_send is True
+            or (use_pending_send is None and session.pending_send is not None)
+        )
+        if use_pending_send is True and session.pending_send is None:
+            raise ValueError(
+                "use_pending_send=True requires session.pending_send; "
+                "call refresh_pending_send first"
+            )
         summary = session.summary
         lines.extend((
             f"session_id={session.session_id}",
@@ -62,24 +80,30 @@ def build_hermes_project_context(
             lines.append("session_next_actions=" + "; ".join(summary.next_actions[:12]))
         if summary.last_assistant_summary:
             lines.append("last_assistant_summary=" + summary.last_assistant_summary)
-        for index, turn in enumerate(session.recent_turns, start=1):
-            lines.append(f"recent_turn[{index}] user_id={turn.user_id} text={turn.text}")
-        if session.summary.compressed_turn_records:
-            lines.append("compressed_turn_summaries:")
-            for index, record in enumerate(
-                session.summary.compressed_turn_records[-8:],
-                start=1,
-            ):
-                evidence = ",".join(record.evidence_ids[:12])
-                lines.append(
-                    f"compressed_turn[{index}] time="
-                    f"{record.occurred_at.isoformat()} "
-                    f"question={record.user_question[:200]} "
-                    f"answer={record.answer_summary[:200]} "
-                    f"evidence_ids={evidence}"
-                )
-        # Citation ledger: metadata only; bodies via projectlens_get_citation_body.
-        lines.append(format_citation_ledger_for_context(session.citations))
+
+        if pending_mode and session.pending_send is not None:
+            # Hard commitment: no recent_turns / compressed / ledger outside this set.
+            lines.append(format_pending_items_for_hermes(session.pending_send.items))
+        else:
+            for index, turn in enumerate(session.recent_turns, start=1):
+                lines.append(f"recent_turn[{index}] user_id={turn.user_id} text={turn.text}")
+            if session.summary.compressed_turn_records:
+                lines.append("compressed_turn_summaries:")
+                for index, record in enumerate(
+                    session.summary.compressed_turn_records[-8:],
+                    start=1,
+                ):
+                    evidence = ",".join(record.evidence_ids[:12])
+                    lines.append(
+                        f"compressed_turn[{index}] time="
+                        f"{record.occurred_at.isoformat()} "
+                        f"question={record.user_question[:200]} "
+                        f"answer={record.answer_summary[:200]} "
+                        f"evidence_ids={evidence}"
+                    )
+            # Citation ledger: metadata only; bodies via projectlens_get_citation_body.
+            lines.append(format_citation_ledger_for_context(session.citations))
+
         if session.task_scratchpad:
             scratch = session.task_scratchpad
             lines.append("task_state=" + repr({
@@ -87,6 +111,7 @@ def build_hermes_project_context(
                 for key in ("phase", "plan", "files_read", "test_results")
                 if key in scratch
             }))
+
     if memory_summary:
         lines.append(render_memory_summary(memory_summary))
     elif memories:
@@ -100,19 +125,32 @@ def build_hermes_project_context(
             )
     else:
         lines.append("approved_project_memories=(none)")
+
+    pending_ids: list[str] = []
+    pending_count = 0
+    token_estimate = 0
+    if session is not None and session.pending_send is not None and pending_mode:
+        pending_ids = [item.item_id for item in session.pending_send.items]
+        pending_count = len(session.pending_send.items)
+        token_estimate = session.pending_send.token_estimate
+
     return HermesProjectContext(
         text="\n".join(lines),
         audit_refs={
             "session_id": str(session.session_id) if session is not None else None,
             "recent_turn_count": len(session.recent_turns) if session is not None else 0,
             "citation_count": len(session.citations) if session is not None else 0,
+            "pending_send_mode": pending_mode,
+            "pending_item_ids": pending_ids,
+            "pending_item_count": pending_count,
+            "pending_token_estimate": token_estimate,
             "memory_ids": (
                 [] if memory_summary else [str(item.id) for item in memories]
             ),
             "memory_count": len(memories),
             "memory_summary_topics": len(memory_summary),
             "runtime_access_keys": sorted(runtime_access or {}),
-            "renderer_version": "hermes_context.v1",
+            "renderer_version": "hermes_context.v2",
         },
-        renderer_version="hermes_context.v1",
+        renderer_version="hermes_context.v2",
     )

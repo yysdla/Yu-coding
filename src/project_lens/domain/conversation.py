@@ -70,6 +70,39 @@ class DefaultContextItem(FrozenModel):
     answer_summary: str | None = Field(default=None, max_length=4_000)
 
 
+class PendingItemMark(StrEnum):
+    """Card mark: default pool vs fine-selected citation."""
+
+    DEFAULT = "default"
+    CITATION = "citation"
+
+
+class PendingSendItem(FrozenModel):
+    """One row in the preview pending-send set (must have occurred_at)."""
+
+    item_id: str = Field(min_length=1, max_length=200)
+    mark: PendingItemMark
+    occurred_at: datetime
+    label: str = Field(min_length=1, max_length=500)
+    source_kind: str = Field(min_length=1, max_length=40)
+    user_question: str | None = Field(default=None, max_length=20_000)
+    answer_summary: str | None = Field(default=None, max_length=4_000)
+    evidence_ids: tuple[str, ...] = ()
+    run_id: UUID | None = None
+    citation_id: str | None = Field(default=None, max_length=64)
+    short_title: str | None = Field(default=None, max_length=CITATION_SHORT_TITLE_MAX)
+
+
+class PendingSendState(FrozenModel):
+    """Preview == send: question + time-sorted items + token budget."""
+
+    question: str = Field(default="", max_length=20_000)
+    question_for_run: str = Field(default="", max_length=20_000)
+    items: tuple[PendingSendItem, ...] = ()
+    token_estimate: int = Field(default=0, ge=0)
+    refreshed_at: datetime = Field(default_factory=utc_now)
+
+
 class CitationSourceKind(StrEnum):
     """Where a citation ledger entry came from."""
 
@@ -162,6 +195,8 @@ class ConversationSession(FrozenModel):
     recent_turns: tuple[ConversationTurn, ...] = ()
     citations: tuple[CitationEntry, ...] = ()
     summary: ConversationSummary
+    # Preview == send (S03). None = legacy path has not refreshed a pending set yet.
+    pending_send: PendingSendState | None = None
     # L3 scratchpad reserved for later Engineering/Ops process state.
     task_scratchpad: dict[str, Any] = Field(default_factory=dict)
     expires_at: datetime = Field(
@@ -339,3 +374,135 @@ def enumerate_default_context_items(
         )
     items.sort(key=lambda item: item.occurred_at.astimezone(timezone.utc))
     return tuple(items)
+
+
+def _pending_item_id_for_default(item: DefaultContextItem) -> str:
+    stamp = item.occurred_at.astimezone(timezone.utc).isoformat()
+    rid = str(item.run_id) if item.run_id is not None else "norun"
+    prefix = "summary" if item.kind == DefaultContextKind.SUMMARY else "turn"
+    return f"{prefix}:{rid}:{stamp}"
+
+
+def pending_item_from_default(item: DefaultContextItem) -> PendingSendItem:
+    """Convert a default-pool row into a pending-send item (mark=默认)."""
+
+    source_kind = (
+        "summary" if item.kind == DefaultContextKind.SUMMARY else "recent_turn"
+    )
+    return PendingSendItem(
+        item_id=_pending_item_id_for_default(item),
+        mark=PendingItemMark.DEFAULT,
+        occurred_at=item.occurred_at,
+        label=item.label,
+        source_kind=source_kind,
+        user_question=item.user_question,
+        answer_summary=item.answer_summary,
+        evidence_ids=item.evidence_ids,
+        run_id=item.run_id,
+    )
+
+
+def pending_item_from_citation(entry: CitationEntry) -> PendingSendItem:
+    """Convert a fine-selected citation into a pending-send item (mark=引用)."""
+
+    return PendingSendItem(
+        item_id=f"citation:{entry.citation_id}",
+        mark=PendingItemMark.CITATION,
+        occurred_at=entry.occurred_at,
+        label=entry.short_title,
+        source_kind="citation",
+        run_id=entry.run_id,
+        citation_id=entry.citation_id,
+        short_title=entry.short_title,
+        evidence_ids=entry.evidence_ids,
+    )
+
+
+def sort_pending_items(
+    items: tuple[PendingSendItem, ...] | list[PendingSendItem],
+) -> tuple[PendingSendItem, ...]:
+    """Ascending by occurred_at (preview order == send order)."""
+
+    return tuple(
+        sorted(items, key=lambda item: item.occurred_at.astimezone(timezone.utc))
+    )
+
+
+def build_pending_send_items(
+    session: ConversationSession,
+    *,
+    date_window: DateWindow | None = None,
+    selected_citation_ids: tuple[str, ...] | frozenset[str] | None = None,
+) -> tuple[PendingSendItem, ...]:
+    """Build time-sorted pending set: defaults + optional fine-selected citations.
+
+    Items without ``occurred_at`` cannot be constructed (field is required).
+    """
+
+    by_id: dict[str, PendingSendItem] = {}
+    for default in enumerate_default_context_items(session, date_window=date_window):
+        item = pending_item_from_default(default)
+        by_id[item.item_id] = item
+
+    if selected_citation_ids:
+        wanted = {cid.strip() for cid in selected_citation_ids if cid and cid.strip()}
+        for entry in session.citations:
+            if entry.citation_id not in wanted:
+                continue
+            item = pending_item_from_citation(entry)
+            by_id[item.item_id] = item
+
+    return sort_pending_items(by_id.values())
+
+
+def exclude_pending_item_ids(
+    items: tuple[PendingSendItem, ...] | list[PendingSendItem],
+    item_ids: tuple[str, ...] | list[str] | set[str],
+) -> tuple[PendingSendItem, ...]:
+    """Drop ids then re-sort by time (removed items must not be sent)."""
+
+    drop = {item_id.strip() for item_id in item_ids if item_id and str(item_id).strip()}
+    kept = [item for item in items if item.item_id not in drop]
+    return sort_pending_items(kept)
+
+
+def format_pending_items_for_hermes(
+    items: tuple[PendingSendItem, ...] | list[PendingSendItem],
+) -> str:
+    """Sole conversation-history fragment when preview==send is active."""
+
+    if not items:
+        return "pending_send=(empty)"
+    lines = ["pending_send:"]
+    for index, item in enumerate(items, start=1):
+        stamp = item.occurred_at.astimezone(timezone.utc).isoformat()
+        mark = "默认" if item.mark == PendingItemMark.DEFAULT else "引用"
+        if item.source_kind == "citation":
+            title = item.short_title or item.label
+            lines.append(
+                f"pending[{index}] mark={mark} time={stamp} "
+                f"citation_id={item.citation_id} title={title}"
+            )
+        elif item.source_kind == "summary":
+            evidence = ",".join(item.evidence_ids[:12])
+            question = (item.user_question or item.label)[:200]
+            answer = (item.answer_summary or "")[:200]
+            lines.append(
+                f"pending[{index}] mark={mark} time={stamp} kind=summary "
+                f"question={question} answer={answer} evidence_ids={evidence}"
+            )
+        else:
+            text = (item.user_question or item.label)[:500]
+            lines.append(
+                f"pending[{index}] mark={mark} time={stamp} "
+                f"kind=recent_turn text={text}"
+            )
+    return "\n".join(lines)
+
+
+def estimate_pending_token_budget(
+    items: tuple[PendingSendItem, ...] | list[PendingSendItem],
+) -> int:
+    """Estimate tokens for the pending-send Hermes fragment."""
+
+    return estimate_text_tokens(format_pending_items_for_hermes(items))

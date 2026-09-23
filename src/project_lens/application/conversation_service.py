@@ -15,10 +15,16 @@ from project_lens.domain.conversation import (
     ConversationTurn,
     DateWindow,
     DefaultContextItem,
+    PendingSendState,
+    build_pending_send_items,
     empty_summary,
     enumerate_default_context_items,
+    estimate_pending_token_budget,
+    exclude_pending_item_ids,
     format_citation_ledger_for_context,
     make_short_title,
+    pending_item_from_citation,
+    sort_pending_items,
     split_recent_turns_for_compression,
 )
 from project_lens.domain.models import ProjectAnswer, ProjectRef
@@ -272,6 +278,129 @@ class ConversationService:
         """
 
         return enumerate_default_context_items(session, date_window=date_window)
+
+    def refresh_pending_send(
+        self,
+        session: ConversationSession,
+        *,
+        question: str,
+        question_for_run: str | None = None,
+        date_window: DateWindow | None = None,
+        selected_citation_ids: tuple[str, ...] | None = None,
+    ) -> ConversationSession:
+        """Rebuild preview pending-send set from defaults (+ optional citations).
+
+        Hard commitment: this set is what Hermes assembly will consume.
+        """
+
+        prior_citations: tuple[str, ...] = ()
+        if selected_citation_ids is not None:
+            prior_citations = selected_citation_ids
+        elif session.pending_send is not None:
+            prior_citations = tuple(
+                item.citation_id
+                for item in session.pending_send.items
+                if item.citation_id
+            )
+
+        items = build_pending_send_items(
+            session,
+            date_window=date_window,
+            selected_citation_ids=prior_citations or None,
+        )
+        q = question.strip()
+        q_run = (question_for_run or question).strip() or q
+        state = PendingSendState(
+            question=q,
+            question_for_run=q_run,
+            items=items,
+            token_estimate=estimate_pending_token_budget(items),
+        )
+        updated = session.model_copy(
+            update={
+                "pending_send": state,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        return saved
+
+    def exclude_from_pending_send(
+        self,
+        session: ConversationSession,
+        item_ids: tuple[str, ...] | list[str],
+    ) -> ConversationSession:
+        """Remove items from pending-send, re-sort by time, refresh token budget."""
+
+        if session.pending_send is None:
+            raise ValueError("pending_send is not set; call refresh_pending_send first")
+        items = exclude_pending_item_ids(session.pending_send.items, item_ids)
+        state = session.pending_send.model_copy(
+            update={
+                "items": items,
+                "token_estimate": estimate_pending_token_budget(items),
+                "refreshed_at": datetime.now(timezone.utc),
+            }
+        )
+        updated = session.model_copy(
+            update={
+                "pending_send": state,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        return saved
+
+    def add_citations_to_pending_send(
+        self,
+        session: ConversationSession,
+        citation_ids: tuple[str, ...] | list[str],
+    ) -> ConversationSession:
+        """Fine-select citations into the pending set (S04 will drive UI)."""
+
+        if session.pending_send is None:
+            raise ValueError("pending_send is not set; call refresh_pending_send first")
+        by_id = {item.item_id: item for item in session.pending_send.items}
+        wanted = {cid.strip() for cid in citation_ids if cid and str(cid).strip()}
+        for entry in session.citations:
+            if entry.citation_id not in wanted:
+                continue
+            item = pending_item_from_citation(entry)
+            by_id[item.item_id] = item
+        items = sort_pending_items(by_id.values())
+        state = session.pending_send.model_copy(
+            update={
+                "items": items,
+                "token_estimate": estimate_pending_token_budget(items),
+                "refreshed_at": datetime.now(timezone.utc),
+            }
+        )
+        updated = session.model_copy(
+            update={
+                "pending_send": state,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        return saved
+
+    def clear_pending_send(self, session: ConversationSession) -> ConversationSession:
+        """Drop pending-send after a confirmed send (or cancel)."""
+
+        if session.pending_send is None:
+            return session
+        updated = session.model_copy(
+            update={
+                "pending_send": None,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        return saved
 
     def find_citation(
         self,
