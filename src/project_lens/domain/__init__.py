@@ -4,6 +4,9 @@ from project_lens.domain.conversation import (
     CitationEntry,
     CitationSourceKind,
     ConversationSession,
+    DateWindow,
+    DefaultContextItem,
+    enumerate_default_context_items,
     format_citation_ledger_for_context,
 )
 from project_lens.domain.identity import ActorContext
@@ -27,6 +30,8 @@ __all__ = [
     "CitationSourceKind",
     "Claim",
     "ConversationSession",
+    "DateWindow",
+    "DefaultContextItem",
     "Evidence",
     "EvidenceRef",
     "ProjectAnswer",
@@ -38,5 +43,6 @@ __all__ = [
     "RiskSeverity",
     "RiskState",
     "RiskType",
+    "enumerate_default_context_items",
     "format_citation_ledger_for_context",
 ]

@@ -13,9 +13,13 @@ from project_lens.domain.conversation import (
     CitationSourceKind,
     ConversationSession,
     ConversationTurn,
+    DateWindow,
+    DefaultContextItem,
     empty_summary,
+    enumerate_default_context_items,
     format_citation_ledger_for_context,
     make_short_title,
+    split_recent_turns_for_compression,
 )
 from project_lens.domain.models import ProjectAnswer, ProjectRef
 from project_lens.runtime.lifecycle import LifecycleBus, LifecycleEventType
@@ -136,6 +140,17 @@ class ConversationService:
             user_id=user_id,
             text=text,
             rewritten_question=rewritten_question,
+            answer_summary=(
+                None
+                if answer is None
+                else (answer.business_summary or answer.technical_summary or "")[:4_000]
+                or None
+            ),
+            evidence_ids=(
+                ()
+                if answer is None
+                else tuple(str(item.id) for item in answer.evidence)
+            ),
         )
         # Citation must be written before compression so overflowed turns stay retrievable.
         citation = self._turn_citation(
@@ -145,8 +160,10 @@ class ConversationService:
         )
         citations = session.citations + (citation,)
         recent = session.recent_turns + (turn,)
-        overflow = recent[: -self._recent_turn_limit]
-        kept = recent[-self._recent_turn_limit :]
+        overflow, kept = split_recent_turns_for_compression(
+            recent,
+            recent_turn_limit=self._recent_turn_limit,
+        )
         # Pin traceback into L2 immediately so restart/compress cannot drop it.
         summary = pin_prior_traceback(
             session.summary,
@@ -176,6 +193,7 @@ class ConversationService:
                     "pinned_evidence_count": len(summary.pinned_ids.evidence_ids),
                     "pinned_file_count": len(summary.pinned_ids.file_paths),
                     "compressed_turns": summary.active_topic.get("compressed_turns"),
+                    "compressed_turn_record_count": len(summary.compressed_turn_records),
                 },
             )
         if answer is not None:
@@ -241,6 +259,19 @@ class ConversationService:
         """Default context lines for the citation ledger (metadata only)."""
 
         return format_citation_ledger_for_context(session.citations)
+
+    def list_default_context_items(
+        self,
+        session: ConversationSession,
+        *,
+        date_window: DateWindow | None = None,
+    ) -> tuple[DefaultContextItem, ...]:
+        """Enumerate default pending items (summary + recent turns).
+
+        ``date_window=None`` means whole pool — no strip-non-today (S02).
+        """
+
+        return enumerate_default_context_items(session, date_window=date_window)
 
     def find_citation(
         self,
