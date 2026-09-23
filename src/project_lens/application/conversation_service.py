@@ -18,6 +18,7 @@ from project_lens.domain.conversation import (
     DefaultContextItem,
     HistoryCandidate,
     PendingSendState,
+    SessionBranchInfo,
     build_pending_send_items,
     empty_summary,
     enumerate_default_context_items,
@@ -100,12 +101,128 @@ class ConversationService:
             user_id=user_id,
             project=project,
             summary=empty_summary(project),
+            branch_name="A",
+            write_stopped=False,
             expires_at=datetime.now(timezone.utc) + self._session_ttl,
         )
         saved = self._store.upsert(session)
+        self._store.set_active_session(saved)
         self._emit_session_event(LifecycleEventType.SESSION_CREATED, saved)
         self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
         return saved
+
+    def list_branches(
+        self,
+        session: ConversationSession,
+    ) -> tuple[SessionBranchInfo, ...]:
+        """Sibling lines under the same Feishu binding (for card switch UI)."""
+
+        siblings = self._store.list_by_binding(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+        )
+        active = self._store.get_by_binding(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+        )
+        active_id = active.session_id if active is not None else None
+        return tuple(
+            item.to_branch_info(is_active=item.session_id == active_id)
+            for item in siblings
+        )
+
+    def fork_session(
+        self,
+        session: ConversationSession,
+        *,
+        branch_name: str | None = None,
+    ) -> ConversationSession:
+        """Copy current line into a new branch; stop writes on the parent.
+
+        Aligns with Hermes ``/branch``: parent freezes at the fork point;
+        only the new line continues. Does not call a model to rewrite history.
+        """
+
+        self._require_writable(session)
+        siblings = self._store.list_by_binding(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+        )
+        name = (branch_name or "").strip() or _next_branch_name(
+            item.branch_name for item in siblings
+        )
+        stopped = session.model_copy(
+            update={
+                "write_stopped": True,
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        self._store.upsert(stopped)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, stopped)
+
+        child = ConversationSession(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+            last_run_id=session.last_run_id,
+            recent_turns=session.recent_turns,
+            citations=session.citations,
+            summary=session.summary,
+            pending_send=session.pending_send,
+            date_window=session.date_window,
+            parent_session_id=session.session_id,
+            branch_name=name,
+            write_stopped=False,
+            task_scratchpad=dict(session.task_scratchpad),
+            expires_at=datetime.now(timezone.utc) + self._session_ttl,
+        )
+        saved = self._store.upsert(child)
+        self._store.set_active_session(saved)
+        self._emit_session_event(LifecycleEventType.SESSION_CREATED, saved)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        return saved
+
+    def switch_session(
+        self,
+        session: ConversationSession,
+        target_session_id: UUID,
+    ) -> ConversationSession:
+        """Make ``target_session_id`` the active line for this binding."""
+
+        target = self._store.get(target_session_id)
+        if target is None:
+            raise KeyError(f"session not found: {target_session_id}")
+        if (
+            target.tenant_id != session.tenant_id
+            or target.chat_id != session.chat_id
+            or target.user_id != session.user_id
+            or target.project.tenant_id != session.project.tenant_id
+            or target.project.project_id != session.project.project_id
+        ):
+            raise ValueError("target session is not a sibling under this binding")
+        if target.write_stopped:
+            target = target.model_copy(
+                update={
+                    "write_stopped": False,
+                    "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+                }
+            )
+            self._store.upsert(target)
+            self._emit_session_event(LifecycleEventType.SESSION_SAVED, target)
+        self._store.set_active_session(target)
+        self._emit_session_event(
+            LifecycleEventType.SESSION_LOADED,
+            target,
+            extra={"switched": True},
+        )
+        return target
 
     def prepare_question(
         self,
@@ -128,6 +245,7 @@ class ConversationService:
     ) -> ConversationSession:
         """Persist EffectiveAccessScope audit bounds on a frozen session."""
 
+        self._require_writable(session)
         merged = {**session.task_scratchpad, "runtime_access": runtime_access}
         updated = session.model_copy(update={"task_scratchpad": merged})
         saved = self._store.upsert(updated)
@@ -146,6 +264,7 @@ class ConversationService:
         task_state: TaskScratchpad | None = None,
         trace_id: str | None = None,
     ) -> ConversationSession:
+        self._require_writable(session)
         turn = ConversationTurn(
             run_id=run_id,
             user_id=user_id,
@@ -254,6 +373,7 @@ class ConversationService:
     ) -> ConversationSession:
         """Pin a fine-selected history / group-message citation onto the ledger."""
 
+        self._require_writable(session)
         if any(item.citation_id == entry.citation_id for item in session.citations):
             return session
         updated = session.model_copy(
@@ -298,6 +418,7 @@ class ConversationService:
         Hard commitment: this set is what Hermes assembly will consume.
         """
 
+        self._require_writable(session)
         prior_citations: tuple[str, ...] = ()
         if selected_citation_ids is not None:
             prior_citations = selected_citation_ids
@@ -339,6 +460,7 @@ class ConversationService:
     ) -> ConversationSession:
         """Remove items from pending-send, re-sort by time, refresh token budget."""
 
+        self._require_writable(session)
         if session.pending_send is None:
             raise ValueError("pending_send is not set; call refresh_pending_send first")
         items = exclude_pending_item_ids(session.pending_send.items, item_ids)
@@ -366,6 +488,7 @@ class ConversationService:
     ) -> ConversationSession:
         """Fine-select citations into the pending set (card「选用」/「加入」)."""
 
+        self._require_writable(session)
         if session.pending_send is None:
             raise ValueError("pending_send is not set; call refresh_pending_send first")
         by_id = {item.item_id: item for item in session.pending_send.items}
@@ -400,6 +523,7 @@ class ConversationService:
     ) -> ConversationSession:
         """Re-include excluded default rows (or known citations) into pending-send."""
 
+        self._require_writable(session)
         if session.pending_send is None:
             raise ValueError("pending_send is not set; call refresh_pending_send first")
         wanted = {iid.strip() for iid in item_ids if iid and str(iid).strip()}
@@ -482,6 +606,7 @@ class ConversationService:
     def clear_pending_send(self, session: ConversationSession) -> ConversationSession:
         """Drop pending-send after a confirmed send (or cancel)."""
 
+        self._require_writable(session)
         if session.pending_send is None:
             return session
         updated = session.model_copy(
@@ -589,6 +714,7 @@ class ConversationService:
         Does not create an AgentRun. ``loop_id`` is a synthetic key for agent_events.
         """
 
+        self._require_writable(session)
         recent = [
             item
             for item in (session.task_scratchpad.get("hermes_tool_loops") or [])
@@ -605,6 +731,22 @@ class ConversationService:
         saved = self._store.upsert(updated)
         self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
         return saved
+
+    def _require_writable(self, session: ConversationSession) -> None:
+        if session.write_stopped:
+            raise ValueError(
+                "session write_stopped: switch to the active branch before writing"
+            )
+        active = self._store.get_by_binding(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+        )
+        if active is None or active.session_id != session.session_id:
+            raise ValueError(
+                "session is not the active branch for this binding; switch first"
+            )
 
     def _turn_citation(
         self,
@@ -647,6 +789,13 @@ class ConversationService:
                 (session.summary.active_topic or {}).get("prior_traceback")
             ),
             "active_skill": session.summary.active_skill,
+            "branch_name": session.branch_name,
+            "write_stopped": session.write_stopped,
+            "parent_session_id": (
+                str(session.parent_session_id)
+                if session.parent_session_id is not None
+                else None
+            ),
         }
         if extra:
             payload.update(extra)
@@ -656,3 +805,13 @@ class ConversationService:
             project=session.project,
             payload=payload,
         )
+
+
+def _next_branch_name(existing: object) -> str:
+    """Pick the next unused single-letter branch label (A..Z), else branch-N."""
+
+    used = {str(name).strip() for name in existing if str(name).strip()}
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if letter not in used:
+            return letter
+    return f"branch-{len(used) + 1}"

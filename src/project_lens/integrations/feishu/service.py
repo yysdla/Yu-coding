@@ -391,12 +391,7 @@ class FeishuEventService:
             background_tasks.add_task(
                 self._messenger.post_card,
                 message.chat_id,
-                render_context_preview_card(
-                    question=pending_state.question or text,
-                    session_id=session.session_id,
-                    items=pending_state.items,
-                    token_estimate=pending_state.token_estimate,
-                ),
+                self._context_preview_card_payload(session),
             )
             return FeishuCallbackResult(status="accepted")
 
@@ -575,6 +570,20 @@ class FeishuEventService:
 
         if action_name == "context_restore_item":
             return self._handle_context_restore_item(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_fork_branch":
+            return self._handle_context_fork_branch(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_switch_branch":
+            return self._handle_context_switch_branch(
                 value=value,
                 chat_id=chat_id,
                 background_tasks=background_tasks,
@@ -819,12 +828,7 @@ class FeishuEventService:
         background_tasks.add_task(
             self._messenger.post_card,
             chat_id,
-            render_context_preview_card(
-                question=pending_state.question or text,
-                session_id=session.session_id,
-                items=pending_state.items,
-                token_estimate=pending_state.token_estimate,
-            ),
+            self._context_preview_card_payload(session),
         )
         return FeishuCallbackResult(status="accepted")
 
@@ -854,6 +858,11 @@ class FeishuEventService:
             raise HTTPException(
                 status_code=409,
                 detail="pending_send missing; @ again to refresh preview",
+            )
+        if session.write_stopped:
+            raise HTTPException(
+                status_code=409,
+                detail="session write_stopped; switch to the active branch",
             )
         pending_state = session.pending_send
         question = pending_state.question_for_run or pending_state.question
@@ -1054,8 +1063,62 @@ class FeishuEventService:
             self._post_context_edit_card(session, chat_id, background_tasks)
         return FeishuCallbackResult(status="accepted")
 
+    def _handle_context_fork_branch(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """新建分支：复制当前线状态，原线停写，绑定切到新线。"""
+
+        session = self._require_pending_session(value)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            child = self._conversation.fork_session(session)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        self._post_context_preview_card(child, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_switch_branch(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """切换已有分支：发送只写入选中线。"""
+
+        session = self._require_pending_session(value, require_writable=False)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        target_raw = str(value.get("target_session_id") or "").strip()
+        if not target_raw:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            target_id = UUID(target_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid target_session_id") from None
+        try:
+            target = self._conversation.switch_session(session, target_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if target.pending_send is None:
+            # Stale line without preview: rebuild from its own pool using last question if any.
+            question = ""
+            target = self._conversation.refresh_pending_send(target, question=question or "（切换分支）")
+        self._post_context_preview_card(target, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
     def _require_pending_session(
-        self, value: dict[str, Any]
+        self,
+        value: dict[str, Any],
+        *,
+        require_writable: bool = True,
     ) -> ConversationSession | None:
         session_id_raw = str(value.get("session_id") or "").strip()
         if not session_id_raw:
@@ -1069,6 +1132,11 @@ class FeishuEventService:
             raise HTTPException(
                 status_code=409,
                 detail="pending_send missing; @ again to refresh preview",
+            )
+        if require_writable and session.write_stopped:
+            raise HTTPException(
+                status_code=409,
+                detail="session write_stopped; switch to the active branch",
             )
         return session
 
@@ -1112,12 +1180,23 @@ class FeishuEventService:
         background_tasks.add_task(
             self._messenger.post_card,
             chat_id,
-            render_context_preview_card(
-                question=pending_state.question,
-                session_id=session.session_id,
-                items=pending_state.items,
-                token_estimate=pending_state.token_estimate,
-            ),
+            self._context_preview_card_payload(session),
+        )
+
+    def _context_preview_card_payload(
+        self,
+        session: ConversationSession,
+    ) -> dict[str, object]:
+        pending_state = session.pending_send
+        assert pending_state is not None
+        branches = self._conversation.list_branches(session)
+        return render_context_preview_card(
+            question=pending_state.question,
+            session_id=session.session_id,
+            items=pending_state.items,
+            token_estimate=pending_state.token_estimate,
+            branches=branches,
+            active_branch_name=session.branch_name,
         )
 
     def _post_context_edit_card(

@@ -786,6 +786,8 @@ def render_context_preview_card(
     session_id: UUID,
     items: tuple[object, ...] | list[object],
     token_estimate: int,
+    branches: tuple[object, ...] | list[object] | None = None,
+    active_branch_name: str | None = None,
 ) -> dict[str, object]:
     """Candidate preview: token budget + time-sorted pending list + three entries.
 
@@ -808,9 +810,26 @@ def render_context_preview_card(
             lines.append(f"   id=`{item_id}`")
 
     body = "\n".join(lines) if lines else "（待发集合为空：本次不会带入历史轮次/摘要）"
+    branch_rows = list(branches or ())
+    if active_branch_name:
+        branch_status = f"当前分支：`{active_branch_name}`"
+    else:
+        branch_status = "当前分支：默认线"
+    if branch_rows:
+        labels: list[str] = []
+        for raw in branch_rows:
+            name = str(getattr(raw, "branch_name", "") or "")
+            stopped = bool(getattr(raw, "write_stopped", False))
+            active = bool(getattr(raw, "is_active", False))
+            marker = "●" if active else "○"
+            frozen = "（已停写）" if stopped else ""
+            labels.append(f"{marker} {name}{frozen}")
+        branch_status += "\n" + " · ".join(labels)
+
     elements: list[dict[str, object]] = [
         _markdown(f"**本次问题**\n{_short_question(question)}"),
         _markdown(f"**Token 预算（估算）**\n约 `{token_estimate}` tokens"),
+        _markdown(f"**分支**\n{branch_status}"),
         _markdown(f"**待发上下文（已按时间排序）**\n{body}"),
         _markdown(
             "预览即实发：下面「直接回答」只会带上列表里的条目与顺序，"
@@ -849,7 +868,45 @@ def render_context_preview_card(
                 },
             ],
         },
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "新建分支"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_fork_branch",
+                        "session_id": str(session_id),
+                    },
+                },
+            ],
+        },
     ]
+    # Switch buttons for sibling branches (exclude current). Cap at 5.
+    switch_actions: list[dict[str, object]] = []
+    for raw in branch_rows:
+        if bool(getattr(raw, "is_active", False)):
+            continue
+        target_id = str(getattr(raw, "session_id", "") or "")
+        name = str(getattr(raw, "branch_name", "") or "")
+        if not target_id or not name:
+            continue
+        switch_actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"切换·{name}"[:20]},
+                "type": "default",
+                "value": {
+                    "action": "context_switch_branch",
+                    "session_id": str(session_id),
+                    "target_session_id": target_id,
+                },
+            }
+        )
+    if switch_actions:
+        elements.append({"tag": "action", "actions": switch_actions[:5]})
+
     # Per-item exclude buttons (quick path on preview). Cap at 5 rows.
     exclude_actions: list[dict[str, object]] = []
     for raw in list(items)[:5]:
