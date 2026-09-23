@@ -780,6 +780,101 @@ def render_collaboration_gate_card(
     return FeishuCard(title="ProjectLens 协作入口", elements=elements).to_payload()
 
 
+def render_context_preview_card(
+    *,
+    question: str,
+    session_id: UUID,
+    items: tuple[object, ...] | list[object],
+    token_estimate: int,
+) -> dict[str, object]:
+    """Candidate preview: token budget + time-sorted pending list + entry placeholders.
+
+    Hard commitment: this list is the only conversation history Hermes will see.
+    Full three-entry edit flows land in S04; buttons here are wired or labeled as such.
+    """
+
+    lines: list[str] = []
+    for index, raw in enumerate(items, start=1):
+        mark = getattr(raw, "mark", None)
+        mark_label = "默认"
+        mark_value = getattr(mark, "value", mark)
+        if str(mark_value) == "citation":
+            mark_label = "引用"
+        occurred = getattr(raw, "occurred_at", None)
+        stamp = occurred.isoformat() if occurred is not None else "(no-time)"
+        label = str(getattr(raw, "label", "") or "")
+        item_id = str(getattr(raw, "item_id", "") or "")
+        lines.append(f"{index}. [{mark_label}] {stamp} · {label}")
+        if item_id:
+            lines.append(f"   id=`{item_id}`")
+
+    body = "\n".join(lines) if lines else "（待发集合为空：本次不会带入历史轮次/摘要）"
+    elements: list[dict[str, object]] = [
+        _markdown(f"**本次问题**\n{_short_question(question)}"),
+        _markdown(f"**Token 预算（估算）**\n约 `{token_estimate}` tokens"),
+        _markdown(f"**待发上下文（已按时间排序）**\n{body}"),
+        _markdown(
+            "预览即实发：下面「直接回答」只会带上列表里的条目与顺序，"
+            "不会再追加未展示的最近轮次。"
+        ),
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "直接回答"},
+                    "type": "primary",
+                    "value": {
+                        "action": "context_direct_answer",
+                        "session_id": str(session_id),
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "编辑上下文"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_edit_placeholder",
+                        "session_id": str(session_id),
+                    },
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "选择更多历史"},
+                    "type": "default",
+                    "value": {
+                        "action": "context_more_history_placeholder",
+                        "session_id": str(session_id),
+                    },
+                },
+            ],
+        },
+    ]
+    # Per-item exclude buttons (S03: user can drop rows before send). Cap at 5 rows.
+    exclude_actions: list[dict[str, object]] = []
+    for raw in list(items)[:5]:
+        item_id = str(getattr(raw, "item_id", "") or "")
+        if not item_id:
+            continue
+        short = str(getattr(raw, "label", "") or item_id)[:18]
+        exclude_actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"去掉·{short}"},
+                "type": "default",
+                "value": {
+                    "action": "context_exclude_item",
+                    "session_id": str(session_id),
+                    "item_id": item_id,
+                },
+            }
+        )
+    if exclude_actions:
+        elements.append({"tag": "action", "actions": exclude_actions[:5]})
+
+    return FeishuCard(title="ProjectLens 上下文预览", elements=elements).to_payload()
+
+
 def render_about_bot_card(*, user_text: str) -> dict[str, object]:
     """Answer questions about ProjectLens itself — no project Skill / Evidence path."""
 

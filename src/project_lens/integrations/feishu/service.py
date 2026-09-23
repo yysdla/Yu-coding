@@ -45,6 +45,7 @@ from project_lens.integrations.feishu.cards import (
     render_about_bot_card,
     render_answer_card,
     render_collaboration_gate_card,
+    render_context_preview_card,
     render_failure_card,
     render_feishu_doc_sync_status_card,
     render_memory_decision_card,
@@ -378,28 +379,24 @@ class FeishuEventService:
             return FeishuCallbackResult(status="accepted")
 
         if ingress.creates_project_run:
-            try:
-                pending = self._prepare_hermes_execution(
-                    project=context.project,
-                    actor=context.actor,
-                    scope=message_access.effective_scope,
-                    question=question_for_run,
-                    entry_mode=ingress.entry_mode or "natural_project_question",
-                    session=session,
-                )
-            except PermissionError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
-                ) from exc
-            background_tasks.add_task(
-                self._execute_prepared_hermes_tool_loop_and_reply,
-                pending,
-                message.chat_id,
-                session.session_id,
-                text,
-                audit_rewrite,
+            session = self._conversation.refresh_pending_send(
+                session,
+                question=text,
+                question_for_run=question_for_run,
             )
-            return FeishuCallbackResult(status="accepted", run_id=str(pending.run.id))
+            pending_state = session.pending_send
+            assert pending_state is not None
+            background_tasks.add_task(
+                self._messenger.post_card,
+                message.chat_id,
+                render_context_preview_card(
+                    question=pending_state.question or text,
+                    session_id=session.session_id,
+                    items=pending_state.items,
+                    token_estimate=pending_state.token_estimate,
+                ),
+            )
+            return FeishuCallbackResult(status="accepted")
 
         # Bot/meta questions (e.g. 你用的是什么模型) — never project Skill analysis.
         if ingress.kind == FeishuIngressKind.BOT_META:
@@ -521,6 +518,34 @@ class FeishuEventService:
                 text=question,
                 background_tasks=background_tasks,
             )
+
+        if action_name == "context_direct_answer":
+            return self._handle_context_direct_answer(
+                value=value,
+                tenant_key=tenant_key.strip(),
+                chat_id=chat_id,
+                operator=operator,
+                context=context,
+                background_tasks=background_tasks,
+            )
+
+        if action_name == "context_exclude_item":
+            return self._handle_context_exclude_item(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
+        if action_name in {"context_edit_placeholder", "context_more_history_placeholder"}:
+            # S04 owns full edit / more-history flows; keep buttons visible in S03.
+            if chat_id:
+                background_tasks.add_task(
+                    self._messenger.post_text,
+                    chat_id,
+                    "「编辑上下文 / 选择更多历史」将在后续版本提供；"
+                    "当前可用「去掉·…」按钮剔除条目后点「直接回答」。",
+                )
+            return FeishuCallbackResult(status="accepted")
 
         if action_name == "projectlens_run_detail":
             run_id_raw = str(value.get("run_id") or "").strip()
@@ -737,23 +762,134 @@ class FeishuEventService:
             )
             return FeishuCallbackResult(status="accepted")
 
-        pending = self._prepare_hermes_execution(
-            project=context.project,
-            actor=context.actor,
-            scope=message_access.effective_scope,
-            question=question_for_run,
-            entry_mode=ingress.entry_mode or "feishu_card_ask",
-            session=session,
+        session = self._conversation.refresh_pending_send(
+            session,
+            question=text,
+            question_for_run=question_for_run,
         )
+        pending_state = session.pending_send
+        assert pending_state is not None
+        background_tasks.add_task(
+            self._messenger.post_card,
+            chat_id,
+            render_context_preview_card(
+                question=pending_state.question or text,
+                session_id=session.session_id,
+                items=pending_state.items,
+                token_estimate=pending_state.token_estimate,
+            ),
+        )
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_direct_answer(
+        self,
+        *,
+        value: dict[str, Any],
+        tenant_key: str,
+        chat_id: str,
+        operator: dict[str, Any],
+        context: dict[str, Any],
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Confirm preview: assemble Hermes from pending-send only."""
+
+        session_id_raw = str(value.get("session_id") or "").strip()
+        operator_open_id = str(operator.get("open_id") or "").strip()
+        if not session_id_raw or not operator_open_id or not chat_id or not tenant_key:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            session_id = UUID(session_id_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid session_id") from None
+
+        session = self._conversation.store.get(session_id)
+        if session is None or session.pending_send is None:
+            raise HTTPException(
+                status_code=409,
+                detail="pending_send missing; @ again to refresh preview",
+            )
+        pending_state = session.pending_send
+        question = pending_state.question_for_run or pending_state.question
+        if not question.strip():
+            return FeishuCallbackResult(status="ignored")
+
+        chat_type = str(context.get("chat_type") or "group")
+        if chat_type not in {"p2p", "group"}:
+            chat_type = "group"
+        try:
+            run_context: FeishuRunContext = self._identity_mapper.resolve(
+                tenant_key=tenant_key,
+                chat_id=chat_id,
+                user_id=operator_open_id,
+                chat_type=chat_type,  # type: ignore[arg-type]
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+        message_access = self._resolve_message_access(run_context)
+        session, _runtime_access = self._attach_runtime_access(session, message_access)
+        try:
+            pending = self._prepare_hermes_execution(
+                project=run_context.project,
+                actor=run_context.actor,
+                scope=message_access.effective_scope,
+                question=question,
+                entry_mode="feishu_context_preview_direct",
+                session=session,
+                use_pending_send=True,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         background_tasks.add_task(
             self._execute_prepared_hermes_tool_loop_and_reply,
             pending,
             chat_id,
             session.session_id,
-            text,
-            audit_rewrite,
+            pending_state.question or question,
+            None if question == pending_state.question else question,
         )
         return FeishuCallbackResult(status="accepted", run_id=str(pending.run.id))
+
+    def _handle_context_exclude_item(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Drop one preview row, re-sort, re-post card (does not delete history)."""
+
+        session_id_raw = str(value.get("session_id") or "").strip()
+        item_id = str(value.get("item_id") or "").strip()
+        if not session_id_raw or not item_id or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            session_id = UUID(session_id_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid session_id") from None
+        session = self._conversation.store.get(session_id)
+        if session is None or session.pending_send is None:
+            raise HTTPException(
+                status_code=409,
+                detail="pending_send missing; @ again to refresh preview",
+            )
+        session = self._conversation.exclude_from_pending_send(session, (item_id,))
+        pending_state = session.pending_send
+        assert pending_state is not None
+        background_tasks.add_task(
+            self._messenger.post_card,
+            chat_id,
+            render_context_preview_card(
+                question=pending_state.question,
+                session_id=session.session_id,
+                items=pending_state.items,
+                token_estimate=pending_state.token_estimate,
+            ),
+        )
+        return FeishuCallbackResult(status="accepted")
 
     def _prepare_hermes_execution(
         self,
@@ -764,6 +900,7 @@ class FeishuEventService:
         question: str,
         entry_mode: str,
         session: ConversationSession | None,
+        use_pending_send: bool = True,
     ) -> PendingHermesExecution:
         runtime = self._hermes_runtime
         if runtime is None:
@@ -788,6 +925,7 @@ class FeishuEventService:
                 "visibility_level": scope.visibility_level.value,
                 "policy_version": scope.policy_version,
             },
+            use_pending_send=use_pending_send if session is not None else False,
         )
         return runtime.prepare(
             project=project,
