@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from project_lens.domain.conversation import ConversationSession
+from project_lens.domain.conversation import (
+    ConversationSession,
+    format_citation_ledger_for_context,
+)
 from project_lens.domain.memory import ProjectMemory
 from project_lens.context.memory_retrieval import (
     MemorySummaryEntry,
@@ -61,6 +64,8 @@ def build_hermes_project_context(
             lines.append("last_assistant_summary=" + summary.last_assistant_summary)
         for index, turn in enumerate(session.recent_turns[-6:], start=1):
             lines.append(f"recent_turn[{index}] user_id={turn.user_id} text={turn.text}")
+        # Citation ledger: metadata only; bodies via projectlens_get_citation_body.
+        lines.append(format_citation_ledger_for_context(session.citations))
         if session.task_scratchpad:
             scratch = session.task_scratchpad
             lines.append("task_state=" + repr({
@@ -86,6 +91,7 @@ def build_hermes_project_context(
         audit_refs={
             "session_id": str(session.session_id) if session is not None else None,
             "recent_turn_count": len(session.recent_turns) if session is not None else 0,
+            "citation_count": len(session.citations) if session is not None else 0,
             "memory_ids": (
                 [] if memory_summary else [str(item.id) for item in memories]
             ),
