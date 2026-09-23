@@ -9,9 +9,13 @@ from project_lens.context.conversation_store import ConversationStore, InMemoryC
 from project_lens.domain.conversation import (
     DEFAULT_RECENT_TURN_LIMIT,
     DEFAULT_SESSION_TTL,
+    CitationEntry,
+    CitationSourceKind,
     ConversationSession,
     ConversationTurn,
     empty_summary,
+    format_citation_ledger_for_context,
+    make_short_title,
 )
 from project_lens.domain.models import ProjectAnswer, ProjectRef
 from project_lens.runtime.lifecycle import LifecycleBus, LifecycleEventType
@@ -33,7 +37,7 @@ from project_lens.workflow.task_scratchpad import (
 
 
 class ConversationService:
-    """Owns L1 recent turns and L2 summary updates. Never writes ProjectMemory."""
+    """Owns L1 recent turns, citation ledger, and L2 summary. Never writes ProjectMemory."""
 
     def __init__(
         self,
@@ -125,6 +129,7 @@ class ConversationService:
         run_id: UUID | None = None,
         answer: ProjectAnswer | None = None,
         task_state: TaskScratchpad | None = None,
+        trace_id: str | None = None,
     ) -> ConversationSession:
         turn = ConversationTurn(
             run_id=run_id,
@@ -132,6 +137,13 @@ class ConversationService:
             text=text,
             rewritten_question=rewritten_question,
         )
+        # Citation must be written before compression so overflowed turns stay retrievable.
+        citation = self._turn_citation(
+            turn,
+            answer=answer,
+            trace_id=trace_id,
+        )
+        citations = session.citations + (citation,)
         recent = session.recent_turns + (turn,)
         overflow = recent[: -self._recent_turn_limit]
         kept = recent[-self._recent_turn_limit :]
@@ -186,6 +198,7 @@ class ConversationService:
             )
         update: dict[str, object] = {
             "recent_turns": kept,
+            "citations": citations,
             "summary": summary,
             "last_run_id": run_id if run_id is not None else session.last_run_id,
             "expires_at": datetime.now(timezone.utc) + self._session_ttl,
@@ -204,6 +217,113 @@ class ConversationService:
             run_id=run_id,
         )
         return saved
+
+    def append_citation(
+        self,
+        session: ConversationSession,
+        entry: CitationEntry,
+    ) -> ConversationSession:
+        """Pin a fine-selected history / group-message citation onto the ledger."""
+
+        if any(item.citation_id == entry.citation_id for item in session.citations):
+            return session
+        updated = session.model_copy(
+            update={
+                "citations": session.citations + (entry,),
+                "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+            }
+        )
+        saved = self._store.upsert(updated)
+        self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
+        return saved
+
+    def citation_context_fragment(self, session: ConversationSession) -> str:
+        """Default context lines for the citation ledger (metadata only)."""
+
+        return format_citation_ledger_for_context(session.citations)
+
+    def find_citation(
+        self,
+        *,
+        citation_id: str,
+        tenant_id: str,
+        chat_id: str,
+        user_id: str,
+        project: ProjectRef,
+    ) -> CitationEntry | None:
+        """Resolve a citation on the active binding session after project match."""
+
+        session = self._store.get_by_binding(
+            tenant_id=tenant_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            project=project,
+        )
+        if session is None:
+            return None
+        if (
+            session.project.tenant_id != project.tenant_id
+            or session.project.project_id != project.project_id
+        ):
+            return None
+        needle = citation_id.strip()
+        for item in session.citations:
+            if item.citation_id == needle:
+                return item
+        return None
+
+    def get_citation_body(
+        self,
+        *,
+        citation_id: str,
+        tenant_id: str,
+        chat_id: str,
+        user_id: str,
+        project: ProjectRef,
+    ) -> dict[str, object] | None:
+        """Return retrievable body payload for one authorized citation, or None."""
+
+        entry = self.find_citation(
+            citation_id=citation_id,
+            tenant_id=tenant_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            project=project,
+        )
+        if entry is None:
+            return None
+        body = (entry.body_snapshot or "").strip()
+        if not body:
+            return {
+                "citation_id": entry.citation_id,
+                "source_kind": entry.source_kind.value,
+                "occurred_at": entry.occurred_at.astimezone(timezone.utc).isoformat(),
+                "short_title": entry.short_title,
+                "body": None,
+                "run_id": str(entry.run_id) if entry.run_id is not None else None,
+                "trace_id": entry.trace_id,
+                "message_id": entry.message_id,
+                "evidence_ids": list(entry.evidence_ids),
+                "file_refs": list(entry.file_refs),
+                "body_available": False,
+                "retrieval_hint": (
+                    "body_snapshot empty; use run_id/trace_id/message_id keys "
+                    "(Feishu fetch lands in S08; GenAI trace in S05)"
+                ),
+            }
+        return {
+            "citation_id": entry.citation_id,
+            "source_kind": entry.source_kind.value,
+            "occurred_at": entry.occurred_at.astimezone(timezone.utc).isoformat(),
+            "short_title": entry.short_title,
+            "body": body,
+            "run_id": str(entry.run_id) if entry.run_id is not None else None,
+            "trace_id": entry.trace_id,
+            "message_id": entry.message_id,
+            "evidence_ids": list(entry.evidence_ids),
+            "file_refs": list(entry.file_refs),
+            "body_available": True,
+        }
 
     def attach_hermes_tool_loop(
         self,
@@ -234,6 +354,26 @@ class ConversationService:
         self._emit_session_event(LifecycleEventType.SESSION_SAVED, saved)
         return saved
 
+    def _turn_citation(
+        self,
+        turn: ConversationTurn,
+        *,
+        answer: ProjectAnswer | None,
+        trace_id: str | None,
+    ) -> CitationEntry:
+        evidence_ids: tuple[str, ...] = ()
+        if answer is not None:
+            evidence_ids = tuple(str(item.id) for item in answer.evidence)
+        return CitationEntry(
+            source_kind=CitationSourceKind.TURN,
+            occurred_at=turn.created_at,
+            short_title=make_short_title(turn.text),
+            run_id=turn.run_id,
+            trace_id=trace_id,
+            evidence_ids=evidence_ids,
+            body_snapshot=turn.text,
+        )
+
     def _emit_session_event(
         self,
         event_type: LifecycleEventType,
@@ -250,6 +390,7 @@ class ConversationService:
             "project_id": session.project.project_id,
             "compression_cycle": session.summary.compression_cycle,
             "recent_turn_count": len(session.recent_turns),
+            "citation_count": len(session.citations),
             "has_prior_traceback": bool(
                 (session.summary.active_topic or {}).get("prior_traceback")
             ),

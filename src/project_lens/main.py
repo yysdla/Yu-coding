@@ -534,6 +534,7 @@ def create_app(database_path: str = ":memory:") -> FastAPI:
     )
     application.state.conversation_store = conversation_store
     application.state.conversation_service = conversation_service
+    project_agent_tool_service.configure_conversation_service(conversation_service)
     application.state.feishu_event_service = FeishuEventService(
         run_service=run_service,
         verifier=FeishuRequestVerifier(
