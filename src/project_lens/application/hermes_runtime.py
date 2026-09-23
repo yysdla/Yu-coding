@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from hashlib import sha256
+from typing import Any
 from uuid import UUID, uuid4
 
+from project_lens.application.genai_trace_service import GenAITraceService
 from project_lens.application.run_service import RunService
 from project_lens.domain.identity import ActorContext
 from project_lens.domain.models import AgentRun, ProjectAnswer, ProjectRef
@@ -25,6 +28,8 @@ from project_lens.workflow.context_snapshot import (
     ContextSnapshotService,
     MemoryCandidate,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -65,10 +70,14 @@ class HermesRuntimeService:
         run_service: RunService,
         bridge: FeishuHermesToolLoopBridge,
         context_snapshots: ContextSnapshotService | None = None,
+        genai_trace_service: GenAITraceService | None = None,
+        tool_catalog_provider: Any | None = None,
     ) -> None:
         self._run_service = run_service
         self._bridge = bridge
         self._context_snapshots = context_snapshots
+        self._genai_trace_service = genai_trace_service
+        self._tool_catalog_provider = tool_catalog_provider
 
     @property
     def run_service(self) -> RunService:
@@ -233,6 +242,7 @@ class HermesRuntimeService:
             )
         if completed is None:
             raise RuntimeError(f"Hermes run {run.id} disappeared before completion")
+        self._archive_genai_trace(pending=pending, completed=completed, result=result)
         return HermesExecutionResult(
             run=completed,
             answer=completed.answer,
@@ -241,6 +251,57 @@ class HermesRuntimeService:
             envelope=result.envelope,
             context=pending.context,
         )
+
+    def _archive_genai_trace(
+        self,
+        *,
+        pending: PendingHermesExecution,
+        completed: AgentRun,
+        result: FeishuHermesToolLoopResult,
+    ) -> None:
+        """Persist GenAI trace json (primary body) while AgentRun remains dual-write."""
+
+        if self._genai_trace_service is None:
+            return
+        tools: tuple[dict[str, Any], ...] = ()
+        if self._tool_catalog_provider is not None:
+            try:
+                catalog = self._tool_catalog_provider.list_tools()
+                raw_tools = catalog.get("tools") if isinstance(catalog, dict) else None
+                if isinstance(raw_tools, list):
+                    tools = tuple(
+                        item for item in raw_tools if isinstance(item, dict)
+                    )
+            except Exception:  # noqa: BLE001
+                _LOG.exception("failed to collect tool catalog for GenAI trace")
+        try:
+            self._genai_trace_service.record_hermes_cycle(
+                run=completed,
+                question=pending.question,
+                context_text=pending.context.text if pending.context is not None else None,
+                messages=getattr(result, "messages", ()) or (),
+                tool_calls=getattr(result, "tool_calls", ()) or (),
+                final_response=(
+                    getattr(result, "final_response", None)
+                    or str((result.envelope or {}).get("answer_summary") or "")
+                ),
+                tool_catalog=tools,
+                runtime_extras={
+                    "hermes_ok": bool(result.ok),
+                    "entry_mode": pending.entry_mode,
+                    "loop_id": str(pending.loop_id),
+                },
+                started_at=pending.run.created_at,
+                ended_at=completed.updated_at,
+            )
+            self._genai_trace_service.apply_retention()
+        except Exception:  # noqa: BLE001
+            # Trace archival must not block the user-facing answer path.
+            _LOG.exception(
+                "GenAI trace archival failed for run_id=%s trace_id=%s",
+                completed.id,
+                completed.trace_id,
+            )
 
     @staticmethod
     def _assert_binding(
