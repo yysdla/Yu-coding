@@ -570,6 +570,13 @@ class FeishuEventService:
                 background_tasks=background_tasks,
             )
 
+        if action_name == "context_select_group_message":
+            return self._handle_context_select_group_message(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
         if action_name == "context_restore_item":
             return self._handle_context_restore_item(
                 value=value,
@@ -988,7 +995,7 @@ class FeishuEventService:
         chat_id: str,
         background_tasks: BackgroundTasks,
     ) -> FeishuCallbackResult:
-        """Paginated session-side history; date_window reused when set (S07)."""
+        """Paginated session + group history; date_window reused when set (S07/S08)."""
 
         session = self._require_pending_session(value)
         if session is None or not chat_id:
@@ -998,8 +1005,13 @@ class FeishuEventService:
         except ValueError:
             offset = 0
         offset = max(0, offset)
+        group_page_token = str(value.get("group_page_token") or "").strip() or None
         self._post_context_more_history_card(
-            session, chat_id, background_tasks, offset=offset
+            session,
+            chat_id,
+            background_tasks,
+            offset=offset,
+            group_page_token=group_page_token,
         )
         return FeishuCallbackResult(status="accepted")
 
@@ -1057,13 +1069,63 @@ class FeishuEventService:
             offset = int(str(value.get("offset") or "0"))
         except ValueError:
             offset = 0
+        group_page_token = str(value.get("group_page_token") or "").strip() or None
         try:
             session = self._conversation.fine_select_history(session, citation_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         # Refresh preview after select (seen = send); keep more-history open for multi-select.
         self._post_context_more_history_card(
-            session, chat_id, background_tasks, offset=max(0, offset)
+            session,
+            chat_id,
+            background_tasks,
+            offset=max(0, offset),
+            group_page_token=group_page_token,
+        )
+        self._post_context_preview_card(session, chat_id, background_tasks)
+        return FeishuCallbackResult(status="accepted")
+
+    def _handle_context_select_group_message(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """Fine-select a Feishu group message → citation + pending + refresh preview."""
+
+        session = self._require_pending_session(value)
+        message_id = str(value.get("message_id") or "").strip()
+        if session is None or not message_id or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        try:
+            offset = int(str(value.get("offset") or "0"))
+        except ValueError:
+            offset = 0
+        group_page_token = str(value.get("group_page_token") or "").strip() or None
+        occurred_raw = str(value.get("occurred_at") or "").strip()
+        occurred_at = None
+        if occurred_raw:
+            try:
+                occurred_at = datetime.fromisoformat(occurred_raw.replace("Z", "+00:00"))
+            except ValueError:
+                occurred_at = None
+        try:
+            session = self._conversation.fine_select_group_message(
+                session,
+                message_id=message_id,
+                occurred_at=occurred_at,
+                short_title=str(value.get("short_title") or "").strip() or None,
+                body_text=str(value.get("body_text") or "") or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        self._post_context_more_history_card(
+            session,
+            chat_id,
+            background_tasks,
+            offset=max(0, offset),
+            group_page_token=group_page_token,
         )
         self._post_context_preview_card(session, chat_id, background_tasks)
         return FeishuCallbackResult(status="accepted")
@@ -1337,6 +1399,7 @@ class FeishuEventService:
         background_tasks: BackgroundTasks,
         *,
         offset: int = 0,
+        group_page_token: str | None = None,
     ) -> None:
         from project_lens.domain.conversation import HISTORY_CANDIDATE_PAGE_SIZE
 
@@ -1345,8 +1408,11 @@ class FeishuEventService:
         page, total = self._conversation.list_history_candidates(
             session, offset=offset, page_size=HISTORY_CANDIDATE_PAGE_SIZE
         )
-        # Touch S08 hook so call sites stay discoverable (always empty for now).
-        _ = self._conversation.list_group_history_stub(session)
+        group = self._conversation.list_group_history(
+            session,
+            page_size=HISTORY_CANDIDATE_PAGE_SIZE,
+            page_token=group_page_token,
+        )
         background_tasks.add_task(
             self._messenger.post_card,
             chat_id,
@@ -1358,6 +1424,12 @@ class FeishuEventService:
                 offset=offset,
                 total=total,
                 page_size=HISTORY_CANDIDATE_PAGE_SIZE,
+                group_candidates=group.candidates,
+                group_available=group.available,
+                group_unavailable_reason=group.unavailable_reason,
+                group_page_token=group_page_token,
+                group_has_more=group.has_more,
+                group_next_page_token=group.next_page_token,
             ),
         )
 

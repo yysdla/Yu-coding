@@ -214,14 +214,33 @@ class ConversationSummary(FrozenModel):
 
 
 class HistoryCandidate(FrozenModel):
-    """One row on the「选择更多历史」card (session-side; group fetch is S08)."""
+    """One row on the「选择更多历史」card (session-side or group message)."""
 
     candidate_id: str = Field(min_length=1, max_length=200)
-    citation_id: str = Field(min_length=1, max_length=64)
+    citation_id: str | None = Field(default=None, max_length=64)
+    message_id: str | None = Field(default=None, max_length=200)
     occurred_at: datetime
     short_title: str = Field(min_length=1, max_length=CITATION_SHORT_TITLE_MAX)
     source_kind: str = Field(min_length=1, max_length=40)
     already_in_pending: bool = False
+    # Fine-select snapshot for group_message (not shown on card by default).
+    body_text: str | None = Field(default=None, max_length=20_000)
+
+    @model_validator(mode="after")
+    def _require_select_key(self) -> HistoryCandidate:
+        if self.citation_id or self.message_id:
+            return self
+        raise ValueError("HistoryCandidate needs citation_id and/or message_id")
+
+
+class GroupHistoryListResult(FrozenModel):
+    """Paginated group-chat candidates plus availability for the more-history card."""
+
+    candidates: tuple[HistoryCandidate, ...] = ()
+    available: bool = True
+    unavailable_reason: str | None = Field(default=None, max_length=500)
+    has_more: bool = False
+    next_page_token: str | None = Field(default=None, max_length=2000)
 
 
 # Page size for Feishu「更多历史」lists (action-row button budget).
@@ -591,7 +610,7 @@ def list_session_history_candidates(
     """Session-side history for「选择更多历史」(paginated).
 
     Uses ``date_window`` when provided, else ``session.date_window``.
-    Group-message candidates are intentionally empty until S08.
+    Group-message candidates come from ConversationService.list_group_history (S08).
     Returns ``(page, total_count)``.
     """
 
@@ -612,6 +631,7 @@ def list_session_history_candidates(
             HistoryCandidate(
                 candidate_id=f"citation:{entry.citation_id}",
                 citation_id=entry.citation_id,
+                message_id=entry.message_id,
                 occurred_at=entry.occurred_at,
                 short_title=entry.short_title,
                 source_kind=entry.source_kind.value,
@@ -627,12 +647,69 @@ def list_session_history_candidates(
     return page, total
 
 
+def group_messages_to_history_candidates(
+    messages: tuple[Any, ...] | list[Any],
+    session: ConversationSession,
+) -> tuple[HistoryCandidate, ...]:
+    """Map normalized group messages to more-history rows (dedupe via message_id)."""
+
+    pending_citation_ids = set()
+    if session.pending_send is not None:
+        pending_citation_ids = {
+            item.citation_id
+            for item in session.pending_send.items
+            if item.citation_id
+        }
+    by_message = {
+        entry.message_id: entry
+        for entry in session.citations
+        if entry.message_id
+    }
+    rows: list[HistoryCandidate] = []
+    for raw in messages:
+        message_id = str(getattr(raw, "message_id", "") or "").strip()
+        if not message_id:
+            continue
+        occurred_at = getattr(raw, "occurred_at", None)
+        if not isinstance(occurred_at, datetime):
+            continue
+        text = str(getattr(raw, "text", "") or "")
+        existing = by_message.get(message_id)
+        if existing is not None:
+            rows.append(
+                HistoryCandidate(
+                    candidate_id=f"group:{message_id}",
+                    citation_id=existing.citation_id,
+                    message_id=message_id,
+                    occurred_at=existing.occurred_at,
+                    short_title=existing.short_title,
+                    source_kind=CitationSourceKind.GROUP_MESSAGE.value,
+                    already_in_pending=existing.citation_id in pending_citation_ids,
+                    body_text=existing.body_snapshot or text or None,
+                )
+            )
+            continue
+        rows.append(
+            HistoryCandidate(
+                candidate_id=f"group:{message_id}",
+                citation_id=None,
+                message_id=message_id,
+                occurred_at=occurred_at.astimezone(timezone.utc),
+                short_title=make_short_title(text),
+                source_kind=CitationSourceKind.GROUP_MESSAGE.value,
+                already_in_pending=False,
+                body_text=text or None,
+            )
+        )
+    return tuple(rows)
+
+
 def list_group_message_candidates_stub(
     session: ConversationSession,
     *,
     date_window: DateWindow | None = None,
 ) -> tuple[HistoryCandidate, ...]:
-    """S08 hook: real Feishu history fetch. Until then always empty."""
+    """Deprecated no-client fallback; real path is ConversationService.list_group_history."""
 
     del session, date_window
     return ()

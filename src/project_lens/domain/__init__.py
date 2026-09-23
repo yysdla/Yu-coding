@@ -6,6 +6,7 @@ from project_lens.domain.conversation import (
     ConversationSession,
     DateWindow,
     DefaultContextItem,
+    GroupHistoryListResult,
     HistoryCandidate,
     PendingItemMark,
     PendingSendItem,
@@ -17,6 +18,7 @@ from project_lens.domain.conversation import (
     format_citation_ledger_for_context,
     format_date_window_label,
     format_pending_items_for_hermes,
+    group_messages_to_history_candidates,
     list_group_message_candidates_stub,
     list_session_history_candidates,
 )
@@ -48,6 +50,7 @@ __all__ = [
     "EvidenceRef",
     "GenAITrace",
     "GenAITraceIndexRecord",
+    "GroupHistoryListResult",
     "HistoryCandidate",
     "PendingItemMark",
     "PendingSendItem",
@@ -69,6 +72,7 @@ __all__ = [
     "format_citation_ledger_for_context",
     "format_date_window_label",
     "format_pending_items_for_hermes",
+    "group_messages_to_history_candidates",
     "list_group_message_candidates_stub",
     "list_session_history_candidates",
 ]
