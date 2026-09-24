@@ -19,6 +19,12 @@ from typing import Any, Protocol
 
 from project_lens.config import assert_external_calls_allowed
 from project_lens.domain.models import ProjectRef
+from project_lens.integrations.feishu.hermes_errors import (
+    HERMES_INVALID_RESULT,
+    HERMES_NO_EVIDENCE,
+    HERMES_UNAVAILABLE,
+    classify_hermes_failure,
+)
 from project_lens.integrations.hermes_plugin.config import ProjectLensPluginConfig
 from project_lens.integrations.hermes_plugin.tools import (
     FORMAL_TOOL_NAMES,
@@ -59,6 +65,8 @@ class HermesLoopRunResult:
     messages: tuple[Any, ...] = ()
     ok: bool = True
     error: str | None = None
+    error_code: str | None = None
+    error_stage: str | None = None
     answer_draft: Any | None = None
     verified_answer: Any | None = None
 
@@ -121,21 +129,16 @@ class HermesAIAgentLoopRunner:
         assert_external_calls_allowed("hermes")
         q = question.strip()
         if not q:
-            return HermesLoopRunResult(
-                final_response="",
-                ok=False,
-                error="empty question",
-            )
+            return _failure_result("empty question")
 
         try:
             self._ensure_hermes_importable()
             self._ensure_tools_registered()
             from run_agent import AIAgent
         except Exception as exc:  # noqa: BLE001
-            return HermesLoopRunResult(
-                final_response="",
-                ok=False,
-                error=f"Hermes unavailable: {exc}",
+            return _failure_result(
+                f"Hermes unavailable: {exc}",
+                default_code=HERMES_UNAVAILABLE,
             )
 
         token = _REQUEST_CTX.set(
@@ -176,19 +179,15 @@ class HermesAIAgentLoopRunner:
             )
             raw = agent.run_conversation(q)
         except Exception as exc:  # noqa: BLE001
-            return HermesLoopRunResult(
-                final_response="",
-                ok=False,
-                error=_classify_hermes_failure(f"Hermes agent loop failed: {exc}"),
-            )
+            return _failure_result(f"Hermes agent loop failed: {exc}")
         finally:
             _REQUEST_CTX.reset(token)
 
         if not isinstance(raw, dict):
-            return HermesLoopRunResult(
+            return _failure_result(
+                "Hermes returned a non-dict conversation result",
                 final_response=str(raw or ""),
-                ok=False,
-                error="Hermes returned a non-dict conversation result",
+                default_code=HERMES_INVALID_RESULT,
             )
 
         messages = tuple(raw.get("messages") or ())
@@ -196,14 +195,11 @@ class HermesAIAgentLoopRunner:
         final_response = str(raw.get("final_response") or "").strip()
         failed = bool(raw.get("failed") or raw.get("error"))
         if failed:
-            return HermesLoopRunResult(
+            return _failure_result(
+                str(raw.get("error") or "Hermes model call failed"),
                 final_response=final_response,
                 tool_calls=tool_calls,
                 messages=messages,
-                ok=False,
-                error=_classify_hermes_failure(
-                    str(raw.get("error") or "Hermes model call failed")
-                ),
             )
         from project_lens.agent.hermes_answer_parser import (
             parse_hermes_answer,
@@ -234,21 +230,20 @@ class HermesAIAgentLoopRunner:
 
         if failed:
             error = recovery_error or str(raw.get("error") or "Hermes model call failed")
-            return HermesLoopRunResult(
+            return _failure_result(
+                error,
                 final_response=final_response,
                 tool_calls=tool_calls,
                 messages=messages,
-                ok=False,
-                error=_classify_hermes_failure(error),
             )
 
         if not _has_citation_ready_evidence(tool_calls):
-            return HermesLoopRunResult(
+            return _failure_result(
+                "Hermes completed without citation-ready project evidence",
                 final_response=final_response,
                 tool_calls=tool_calls,
                 messages=messages,
-                ok=False,
-                error="Hermes completed without citation-ready project evidence",
+                default_code=HERMES_NO_EVIDENCE,
             )
 
         answer_draft = parse_structured_hermes_answer(final_response)
@@ -369,15 +364,41 @@ def _run_evidence_recovery(*, agent: Any, question: str) -> dict[str, Any] | Non
     try:
         response = agent.run_conversation(prompt)
     except Exception as exc:  # noqa: BLE001
-        return {"failed": True, "error": _classify_hermes_failure(str(exc))}
-    return response if isinstance(response, dict) else {"failed": True, "error": "Hermes recovery returned an invalid response"}
+        return {
+            "failed": True,
+            "error": classify_hermes_failure(str(exc)).format_run_error(),
+        }
+    return (
+        response
+        if isinstance(response, dict)
+        else {
+            "failed": True,
+            "error": classify_hermes_failure(
+                "Hermes recovery returned an invalid response",
+                default_code=HERMES_INVALID_RESULT,
+            ).format_run_error(),
+        }
+    )
 
 
-def _classify_hermes_failure(error: str) -> str:
-    lowered = error.casefold()
-    if any(marker in lowered for marker in ("502", "429", "503", "504", "api", "model", "gateway", "rate limit")):
-        return f"模型调用失败：{error}"
-    return error
+def _failure_result(
+    error: str,
+    *,
+    final_response: str = "",
+    tool_calls: tuple[HermesLoopToolCall, ...] = (),
+    messages: tuple[Any, ...] = (),
+    default_code: str | None = None,
+) -> HermesLoopRunResult:
+    info = classify_hermes_failure(error, default_code=default_code)
+    return HermesLoopRunResult(
+        final_response=final_response,
+        tool_calls=tool_calls,
+        messages=messages,
+        ok=False,
+        error=info.format_run_error(),
+        error_code=info.code,
+        error_stage=info.stage,
+    )
 
 
 class _HermesRegistryToolContext:

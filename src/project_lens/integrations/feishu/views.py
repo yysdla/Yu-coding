@@ -127,10 +127,23 @@ def is_degraded_answer(answer: ProjectAnswer) -> bool:
     return any(marker in unknowns_blob for marker in _DEGRADED_UNKNOWN_MARKERS)
 
 
-def degraded_answer_banner() -> str:
+def degraded_answer_banner(
+    answer: ProjectAnswer | None = None,
+    *,
+    run_id: object | None = None,
+) -> str:
+    if answer is None:
+        return (
+            "**【降级标注】本条不是 Hermes 完整项目回答**\n"
+            "原因：没有通过引用校验的可展示结论，或当前资料不足。"
+            "正文为系统兜底文案，请勿当作已核实的项目结论。"
+        )
+    from project_lens.integrations.feishu.hermes_errors import (
+        format_degraded_banner_for_feishu,
+    )
+
     return (
-        "**【降级标注】本条不是 Hermes 完整项目回答**\n"
-        "原因：没有通过引用校验的可展示结论，或当前资料不足。"
+        f"**{format_degraded_banner_for_feishu(answer, run_id=run_id)}**\n"
         "正文为系统兜底文案，请勿当作已核实的项目结论。"
     )
 

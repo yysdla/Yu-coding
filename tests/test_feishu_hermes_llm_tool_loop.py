@@ -287,7 +287,10 @@ def test_real_runner_passes_explicit_model_endpoint_and_api_key(
     )
 
     assert result.ok is False
-    assert result.error == "Hermes completed without citation-ready project evidence"
+    assert result.error_code == "HERMES_NO_EVIDENCE"
+    assert "Hermes completed without citation-ready project evidence" in (
+        result.error or ""
+    )
     assert captured["provider"] == "openai"
     assert captured["model"] == "gpt-test"
     assert captured["base_url"] == "https://example.test/v1"
@@ -332,7 +335,10 @@ def test_real_runner_appends_projectlens_context_to_ephemeral_prompt(
     )
 
     assert result.ok is False
-    assert result.error == "Hermes completed without citation-ready project evidence"
+    assert result.error_code == "HERMES_NO_EVIDENCE"
+    assert "Hermes completed without citation-ready project evidence" in (
+        result.error or ""
+    )
     assert "approved_project_memories: owner=Ada" in captured["ephemeral_system_prompt"]
 
 
@@ -461,7 +467,9 @@ def test_real_runner_marks_model_gateway_errors_as_model_failure(
 
     assert result.ok is False
     assert result.error is not None
-    assert result.error.startswith("模型调用失败：")
+    assert result.error_code == "HERMES_MODEL_FAILED"
+    assert "[HERMES_MODEL_FAILED@hermes.model]" in result.error
+    assert "模型调用失败" in result.error
 
 
 def test_real_runner_classifies_model_exception_as_model_failure(
@@ -493,7 +501,9 @@ def test_real_runner_classifies_model_exception_as_model_failure(
 
     assert result.ok is False
     assert result.error is not None
-    assert result.error.startswith("模型调用失败：")
+    assert result.error_code == "HERMES_MODEL_FAILED"
+    assert "[HERMES_MODEL_FAILED@hermes.model]" in result.error
+    assert "模型调用失败" in result.error
 
 
 def test_real_runner_repr_does_not_expose_api_key() -> None:

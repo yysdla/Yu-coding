@@ -338,6 +338,10 @@ def _build_answer_envelope(
     }
     if result.error:
         audit_ref["error"] = result.error
+    if result.error_code:
+        audit_ref["error_code"] = result.error_code
+    if result.error_stage:
+        audit_ref["error_stage"] = result.error_stage
 
     if not evidence_refs and citations:
         evidence_refs = list(citations)

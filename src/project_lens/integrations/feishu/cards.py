@@ -214,7 +214,10 @@ def render_answer_card(
 
     degraded = is_degraded_answer(answer)
     if degraded:
-        elements = [_markdown(degraded_answer_banner()), *elements]
+        elements = [
+            _markdown(degraded_answer_banner(answer, run_id=run.id)),
+            *elements,
+        ]
 
     title = answer_view_title(view)
     if degraded:
@@ -711,25 +714,23 @@ def render_memory_decision_card(
 
 
 def render_failure_card(run: AgentRun) -> dict[str, object]:
-    error = (run.error or "").strip()
-    model_failure = "模型调用失败" in error or any(
-        marker in error.casefold()
-        for marker in ("502", "429", "503", "504", "api", "gateway", "rate limit")
+    from project_lens.integrations.feishu.hermes_errors import (
+        HERMES_MODEL_FAILED,
+        classify_hermes_failure,
+        format_failure_for_feishu,
     )
-    heading = "模型调用失败" if model_failure else "ProjectLens 处理失败"
-    if model_failure and error:
-        detail = f"模型服务暂时不可用，未能完成这次回答。\n原因：{error[:400]}"
-    elif error:
-        detail = f"这次我没能完成项目资料核对。\n原因：{error[:400]}"
-    else:
-        detail = "这次我没能完成项目资料核对。"
+
+    info = classify_hermes_failure(run.error or "")
+    heading = (
+        "模型调用失败"
+        if info.code == HERMES_MODEL_FAILED
+        else f"处理失败 · {info.code}"
+    )
+    body = format_failure_for_feishu(error=run.error, run_id=run.id)
     return FeishuCard(
         title=heading,
         elements=[
-            _markdown(
-                f"**{detail}**\n"
-                "你可以稍后重试，或者把问题缩小到某个服务、文件或接口。"
-            ),
+            _markdown(body),
             _run_detail_actions(run.id),
         ],
     ).to_payload()
@@ -738,23 +739,9 @@ def render_failure_card(run: AgentRun) -> dict[str, object]:
 def format_failure_as_text(run: AgentRun) -> str:
     """Plain-text failure reply (no interactive card)."""
 
-    error = (run.error or "").strip()
-    model_failure = "模型调用失败" in error or any(
-        marker in error.casefold()
-        for marker in ("502", "429", "503", "504", "api", "gateway", "rate limit")
-    )
-    heading = (
-        "【降级标注】模型调用失败（非 Hermes 完整结论）"
-        if model_failure
-        else "【降级标注】ProjectLens 处理失败（非 Hermes 完整结论）"
-    )
-    if model_failure and error:
-        detail = f"模型服务暂时不可用，未能完成这次回答。\n原因：{error[:400]}"
-    elif error:
-        detail = f"这次我没能完成项目资料核对。\n原因：{error[:400]}"
-    else:
-        detail = "这次我没能完成项目资料核对。"
-    return f"{heading}\n{detail}\n你可以稍后重试，或者把问题缩小到某个服务、文件或接口。"
+    from project_lens.integrations.feishu.hermes_errors import format_failure_for_feishu
+
+    return format_failure_for_feishu(error=run.error, run_id=run.id)
 
 
 def format_answer_as_text(

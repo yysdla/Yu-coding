@@ -199,11 +199,19 @@ class HermesRuntimeService:
             error = None
             answer = result.verified_answer if result.ok else None
             if answer is None:
-                error = str(
-                    result.envelope.get("audit_ref", {}).get("error")
+                audit = (
+                    result.envelope.get("audit_ref")
                     if isinstance(result.envelope.get("audit_ref"), dict)
-                    else ""
-                ) or "Hermes tool loop failed verification"
+                    else {}
+                )
+                raw_error = str(audit.get("error") or "").strip()
+                if not raw_error:
+                    raw_error = "Hermes tool loop failed verification"
+                from project_lens.integrations.feishu.hermes_errors import (
+                    classify_hermes_failure,
+                )
+
+                error = classify_hermes_failure(raw_error).format_run_error()
             completed = await self._run_service.complete_external(
                 run.id,
                 answer=answer,
@@ -223,10 +231,19 @@ class HermesRuntimeService:
                 },
             )
         except Exception as exc:  # noqa: BLE001
+            from project_lens.integrations.feishu.hermes_errors import (
+                PROJECTLENS_RUNTIME,
+                classify_hermes_failure,
+            )
+
+            runtime_error = classify_hermes_failure(
+                f"Hermes runtime failed: {exc}",
+                default_code=PROJECTLENS_RUNTIME,
+            ).format_run_error()
             completed = await self._run_service.complete_external(
                 run.id,
                 answer=None,
-                error=f"Hermes runtime failed: {exc}",
+                error=runtime_error,
                 agent_mode="hermes",
                 hermes_loop_id=loop_id,
                 metadata={
@@ -236,7 +253,14 @@ class HermesRuntimeService:
             )
             result = FeishuHermesToolLoopResult(
                 ok=False,
-                envelope={"ok": False, "audit_ref": {"error": str(exc)}},
+                envelope={
+                    "ok": False,
+                    "audit_ref": {
+                        "error": runtime_error,
+                        "error_code": PROJECTLENS_RUNTIME,
+                        "error_stage": "projectlens.runtime",
+                    },
+                },
                 loop_id=loop_id,
                 trace_id=run.trace_id,
             )

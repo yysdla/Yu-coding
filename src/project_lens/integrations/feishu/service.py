@@ -1646,16 +1646,19 @@ class FeishuEventService:
             raise RuntimeError("Hermes runtime is not configured")
         try:
             execution = await runtime.execute_prepared(pending)
-        except Exception:  # noqa: BLE001 - background task must still notify the chat
+        except Exception as exc:  # noqa: BLE001 - background task must still notify the chat
             logger.exception(
                 "hermes execute_prepared failed chat_id=%s run_id=%s",
                 chat_id,
                 pending.run.id,
             )
+            from project_lens.integrations.feishu.hermes_errors import (
+                format_unexpected_for_feishu,
+            )
+
             await self._safe_post_text(
                 chat_id,
-                "【降级标注】ProjectLens 处理失败（非 Hermes 完整结论）\n"
-                "这次我没能完成项目资料核对。你可以稍后重试。",
+                format_unexpected_for_feishu(exc, run_id=pending.run.id),
             )
             return
 
@@ -1665,15 +1668,19 @@ class FeishuEventService:
                 chat_id=chat_id,
                 execution=execution,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "feishu hermes reply failed chat_id=%s run_id=%s",
                 chat_id,
                 execution.run.id,
             )
+            from project_lens.integrations.feishu.hermes_errors import (
+                format_delivery_failure_for_feishu,
+            )
+
             await self._safe_post_text(
                 chat_id,
-                "回答已生成，但发送到飞书失败。请稍后重试或查看服务日志。",
+                format_delivery_failure_for_feishu(exc, run_id=execution.run.id),
             )
 
         try:

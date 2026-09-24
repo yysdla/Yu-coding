@@ -185,7 +185,8 @@ def test_insufficient_evidence_fallback_is_actionable() -> None:
     assert card["header"]["title"]["content"] == DEGRADED_ANSWER_TITLE
     joined = "\n".join(item.get("content", "") for item in card["elements"])
     assert "【降级标注】" in joined
-    assert "不是 Hermes 完整项目回答" in joined
+    assert "HERMES_INSUFFICIENT_EVIDENCE" in joined
+    assert "hermes.evidence" in joined
     assert "当前资料不足" in joined
     assert "我查了什么" in joined or "我已经知道" in joined
     assert "还缺" in joined
@@ -212,7 +213,8 @@ def test_verifier_stock_summary_is_marked_degraded_not_hermes() -> None:
     text = format_answer_as_text(_run("你看不到项目文档吗"), answer)
     assert text.startswith(DEGRADED_ANSWER_TITLE)
     assert "【降级标注】" in text
-    assert "不是 Hermes 完整项目回答" in text
+    assert "HERMES_INSUFFICIENT_EVIDENCE" in text
+    assert "hermes.evidence" in text
 
 
 def test_cited_facts_keep_normal_title_despite_dimension_unknowns() -> None:
@@ -247,8 +249,23 @@ def test_format_failure_text_marks_non_hermes() -> None:
     run = _run("介绍项目")
     run = run.model_copy(update={"error": "Hermes agent loop failed: boom"})
     text = format_failure_as_text(run)
-    assert text.startswith("【降级标注】")
-    assert "非 Hermes 完整结论" in text
+    assert text.startswith("【错误】")
+    assert "HERMES_AGENT_LOOP_FAILED" in text
+    assert "hermes.agent_loop" in text
+    assert "boom" in text
+    assert str(run.id) in text
+
+
+def test_format_failure_text_marks_model_gateway() -> None:
+    run = _run("介绍项目")
+    run = run.model_copy(
+        update={"error": "[HERMES_MODEL_FAILED@hermes.model] 模型调用失败：HTTP 502"}
+    )
+    text = format_failure_as_text(run)
+    assert "【错误】模型调用失败" in text
+    assert "HERMES_MODEL_FAILED" in text
+    assert "hermes.model" in text
+    assert "HTTP 502" in text
 
 
 def test_audit_debug_zone_omits_secrets_and_is_not_first_screen(monkeypatch) -> None:
