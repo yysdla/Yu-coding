@@ -295,6 +295,139 @@ def test_preview_card_exposes_fork_and_switch_actions() -> None:
     assert "新建分支" in payload
 
 
+def test_fork_and_switch_re_render_original_card_not_new_message() -> None:
+    """新建/切换分支必须通过回调 card= 原地刷新，不得再 post_card 新消息。"""
+
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from project_lens.integrations.feishu.adapter import RecordingFeishuMessenger
+    from project_lens.integrations.feishu.identity import parse_project_bindings
+    from project_lens.main import create_app
+
+    local_token = "project-lens-local-token"
+    app = create_app()
+    verifier = app.state.feishu_event_service._verifier
+    verifier._verification_token = local_token
+    verifier._signing_secret = None
+    app.state.feishu_event_service._identity_mapper = parse_project_bindings(
+        "", default_project=_project(), allow_demo_fallback=True
+    )
+    messenger = RecordingFeishuMessenger()
+    app.state.feishu_messenger = messenger
+    app.state.feishu_event_service._messenger = messenger
+    client = TestClient(app)
+
+    preview = client.post(
+        "/api/v1/feishu/events",
+        json={
+            "schema": "2.0",
+            "token": local_token,
+            "header": {
+                "event_id": "fork-preview",
+                "event_type": "im.message.receive_v1",
+                "tenant_key": "demo",
+            },
+            "event": {
+                "sender": {"sender_id": {"open_id": "u1"}},
+                "message": {
+                    "message_id": "message-fork-preview",
+                    "chat_id": "chat-1",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "介绍一下项目"}),
+                },
+            },
+        },
+    )
+    assert preview.status_code == 200
+    cards_after_preview = [
+        item for item in messenger.messages if item.message_type == "interactive"
+    ]
+    assert len(cards_after_preview) == 1
+
+    session = app.state.conversation_store.get_by_binding(
+        tenant_id="demo",
+        chat_id="chat-1",
+        user_id="u1",
+        project=_project(),
+    )
+    assert session is not None
+    parent_id = session.session_id
+
+    fork = client.post(
+        "/api/v1/feishu/events",
+        json={
+            "schema": "2.0",
+            "token": local_token,
+            "header": {
+                "event_id": "fork-click",
+                "event_type": "card.action.trigger",
+                "tenant_key": "demo",
+            },
+            "event": {
+                "operator": {"open_id": "u1", "user_id": "u1"},
+                "action": {
+                    "tag": "button",
+                    "value": {
+                        "action": "context_fork_branch",
+                        "session_id": str(parent_id),
+                    },
+                },
+                "context": {"open_chat_id": "chat-1", "chat_type": "group"},
+            },
+        },
+    )
+    assert fork.status_code == 200
+    fork_body = fork.json()
+    assert fork_body["status"] == "accepted"
+    assert fork_body.get("card", {}).get("type") == "raw"
+    assert "新建分支" in str(fork_body["card"]["data"]) or "分支" in str(
+        fork_body.get("toast", {})
+    )
+    assert len([item for item in messenger.messages if item.message_type == "interactive"]) == 1
+
+    child = app.state.conversation_store.get_by_binding(
+        tenant_id="demo",
+        chat_id="chat-1",
+        user_id="u1",
+        project=_project(),
+    )
+    assert child is not None
+    assert child.session_id != parent_id
+
+    switch = client.post(
+        "/api/v1/feishu/events",
+        json={
+            "schema": "2.0",
+            "token": local_token,
+            "header": {
+                "event_id": "switch-click",
+                "event_type": "card.action.trigger",
+                "tenant_key": "demo",
+            },
+            "event": {
+                "operator": {"open_id": "u1", "user_id": "u1"},
+                "action": {
+                    "tag": "button",
+                    "value": {
+                        "action": "context_switch_branch",
+                        "session_id": str(child.session_id),
+                        "target_session_id": str(parent_id),
+                    },
+                },
+                "context": {"open_chat_id": "chat-1", "chat_type": "group"},
+            },
+        },
+    )
+    assert switch.status_code == 200
+    switch_body = switch.json()
+    assert switch_body["status"] == "accepted"
+    assert switch_body.get("card", {}).get("type") == "raw"
+    assert len([item for item in messenger.messages if item.message_type == "interactive"]) == 1
+
+
 def test_inmemory_fork_list_and_active() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store=store)

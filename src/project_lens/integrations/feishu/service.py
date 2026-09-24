@@ -1243,7 +1243,7 @@ class FeishuEventService:
         chat_id: str,
         background_tasks: BackgroundTasks,
     ) -> FeishuCallbackResult:
-        """新建分支：复制当前线状态，原线停写，绑定切到新线。"""
+        """新建分支：复制当前线状态，原线停写，绑定切到新线；原卡片原地刷新。"""
 
         session = self._require_pending_session(value)
         if session is None or not chat_id:
@@ -1252,8 +1252,12 @@ class FeishuEventService:
             child = self._conversation.fork_session(session)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        self._post_context_preview_card(child, chat_id, background_tasks)
-        return FeishuCallbackResult(status="accepted")
+        return FeishuCallbackResult(
+            status="accepted",
+            card=self._context_preview_card_payload(child),
+            toast_type="success",
+            toast_content=f"已新建分支 {child.branch_name}",
+        )
 
     def _handle_context_switch_branch(
         self,
@@ -1262,7 +1266,7 @@ class FeishuEventService:
         chat_id: str,
         background_tasks: BackgroundTasks,
     ) -> FeishuCallbackResult:
-        """切换已有分支：发送只写入选中线。"""
+        """切换已有分支：发送只写入选中线；原卡片原地刷新。"""
 
         session = self._require_pending_session(value, require_writable=False)
         if session is None or not chat_id:
@@ -1284,8 +1288,12 @@ class FeishuEventService:
             # Stale line without preview: rebuild from its own pool using last question if any.
             question = ""
             target = self._conversation.refresh_pending_send(target, question=question or "（切换分支）")
-        self._post_context_preview_card(target, chat_id, background_tasks)
-        return FeishuCallbackResult(status="accepted")
+        return FeishuCallbackResult(
+            status="accepted",
+            card=self._context_preview_card_payload(target),
+            toast_type="info",
+            toast_content=f"已切换到 {target.branch_name}",
+        )
 
     def _handle_context_open_date_window(
         self,
