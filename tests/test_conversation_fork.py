@@ -291,8 +291,55 @@ def test_preview_card_exposes_fork_and_switch_actions() -> None:
     payload = str(card)
     assert "context_fork_branch" in payload
     assert "context_switch_branch" in payload
+    assert "context_delete_branch" in payload
     assert "切换·A" in payload
     assert "新建分支" in payload
+    assert "删除分支" in payload
+
+
+def test_preview_card_hides_delete_when_only_one_branch() -> None:
+    from project_lens.domain.conversation import SessionBranchInfo
+
+    only = SessionBranchInfo(
+        session_id=uuid4(),
+        branch_name="A",
+        write_stopped=False,
+        is_active=True,
+    )
+    card = render_context_preview_card(
+        question="q",
+        session_id=only.session_id,
+        items=(),
+        token_estimate=1,
+        branches=(only,),
+        active_branch_name="A",
+    )
+    payload = str(card)
+    assert "context_fork_branch" in payload
+    assert "context_delete_branch" not in payload
+    assert "删除分支" not in payload
+
+
+def test_delete_session_removes_branch_and_rebinds() -> None:
+    service = ConversationService()
+    parent = _seed(service, chat_id="chat-delete")
+    child = service.fork_session(parent)
+    assert child.branch_name == "B"
+
+    survivor = service.delete_session(child)
+    assert survivor.session_id == parent.session_id
+    assert survivor.write_stopped is False
+    assert service.store.get(child.session_id) is None
+    active = service.get_or_create(
+        tenant_id="demo",
+        chat_id="chat-delete",
+        user_id="user-1",
+        project=_project(),
+    )
+    assert active.session_id == parent.session_id
+
+    with pytest.raises(ValueError, match="only remaining"):
+        service.delete_session(active)
 
 
 def test_fork_and_switch_re_render_original_card_not_new_message() -> None:
@@ -425,6 +472,138 @@ def test_fork_and_switch_re_render_original_card_not_new_message() -> None:
     switch_body = switch.json()
     assert switch_body["status"] == "accepted"
     assert switch_body.get("card", {}).get("type") == "raw"
+    assert len([item for item in messenger.messages if item.message_type == "interactive"]) == 1
+
+
+def test_delete_branch_card_action_re_renders_and_drops_session() -> None:
+    """删除分支：回调 card= 原地刷新，目标会话从 store 消失，绑定切到剩余线。"""
+
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from project_lens.integrations.feishu.adapter import RecordingFeishuMessenger
+    from project_lens.integrations.feishu.identity import parse_project_bindings
+    from project_lens.main import create_app
+
+    local_token = "project-lens-local-token"
+    app = create_app()
+    verifier = app.state.feishu_event_service._verifier
+    verifier._verification_token = local_token
+    verifier._signing_secret = None
+    app.state.feishu_event_service._identity_mapper = parse_project_bindings(
+        "", default_project=_project(), allow_demo_fallback=True
+    )
+    messenger = RecordingFeishuMessenger()
+    app.state.feishu_messenger = messenger
+    app.state.feishu_event_service._messenger = messenger
+    client = TestClient(app)
+
+    preview = client.post(
+        "/api/v1/feishu/events",
+        json={
+            "schema": "2.0",
+            "token": local_token,
+            "header": {
+                "event_id": "delete-preview",
+                "event_type": "im.message.receive_v1",
+                "tenant_key": "demo",
+            },
+            "event": {
+                "sender": {"sender_id": {"open_id": "u1"}},
+                "message": {
+                    "message_id": "message-delete-preview",
+                    "chat_id": "chat-1",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "介绍一下项目"}),
+                },
+            },
+        },
+    )
+    assert preview.status_code == 200
+
+    parent = app.state.conversation_store.get_by_binding(
+        tenant_id="demo",
+        chat_id="chat-1",
+        user_id="u1",
+        project=_project(),
+    )
+    assert parent is not None
+    parent_id = parent.session_id
+
+    fork = client.post(
+        "/api/v1/feishu/events",
+        json={
+            "schema": "2.0",
+            "token": local_token,
+            "header": {
+                "event_id": "delete-fork",
+                "event_type": "card.action.trigger",
+                "tenant_key": "demo",
+            },
+            "event": {
+                "operator": {"open_id": "u1", "user_id": "u1"},
+                "action": {
+                    "tag": "button",
+                    "value": {
+                        "action": "context_fork_branch",
+                        "session_id": str(parent_id),
+                    },
+                },
+                "context": {"open_chat_id": "chat-1", "chat_type": "group"},
+            },
+        },
+    )
+    assert fork.status_code == 200
+    child = app.state.conversation_store.get_by_binding(
+        tenant_id="demo",
+        chat_id="chat-1",
+        user_id="u1",
+        project=_project(),
+    )
+    assert child is not None
+    assert child.session_id != parent_id
+    child_id = child.session_id
+
+    delete = client.post(
+        "/api/v1/feishu/events",
+        json={
+            "schema": "2.0",
+            "token": local_token,
+            "header": {
+                "event_id": "delete-click",
+                "event_type": "card.action.trigger",
+                "tenant_key": "demo",
+            },
+            "event": {
+                "operator": {"open_id": "u1", "user_id": "u1"},
+                "action": {
+                    "tag": "button",
+                    "value": {
+                        "action": "context_delete_branch",
+                        "session_id": str(child_id),
+                        "target_session_id": str(child_id),
+                    },
+                },
+                "context": {"open_chat_id": "chat-1", "chat_type": "group"},
+            },
+        },
+    )
+    assert delete.status_code == 200
+    body = delete.json()
+    assert body["status"] == "accepted"
+    assert body.get("card", {}).get("type") == "raw"
+    assert app.state.conversation_store.get(child_id) is None
+    active = app.state.conversation_store.get_by_binding(
+        tenant_id="demo",
+        chat_id="chat-1",
+        user_id="u1",
+        project=_project(),
+    )
+    assert active is not None
+    assert active.session_id == parent_id
+    assert active.write_stopped is False
     assert len([item for item in messenger.messages if item.message_type == "interactive"]) == 1
 
 

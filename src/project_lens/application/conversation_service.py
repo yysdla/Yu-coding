@@ -208,17 +208,7 @@ class ConversationService:
     ) -> ConversationSession:
         """Make ``target_session_id`` the active line for this binding."""
 
-        target = self._store.get(target_session_id)
-        if target is None:
-            raise KeyError(f"session not found: {target_session_id}")
-        if (
-            target.tenant_id != session.tenant_id
-            or target.chat_id != session.chat_id
-            or target.user_id != session.user_id
-            or target.project.tenant_id != session.project.tenant_id
-            or target.project.project_id != session.project.project_id
-        ):
-            raise ValueError("target session is not a sibling under this binding")
+        target = self._require_sibling(session, target_session_id)
         if target.write_stopped:
             target = target.model_copy(
                 update={
@@ -234,6 +224,94 @@ class ConversationService:
             target,
             extra={"switched": True},
         )
+        return target
+
+    def delete_session(
+        self,
+        session: ConversationSession,
+        target_session_id: UUID | None = None,
+    ) -> ConversationSession:
+        """Delete a sibling branch and keep the binding on a survivor.
+
+        Defaults to deleting ``session`` itself. Refuses when it would leave
+        zero branches under the binding.
+        """
+
+        target_id = target_session_id or session.session_id
+        target = self._require_sibling(session, target_id)
+        siblings = self._store.list_by_binding(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+        )
+        if len(siblings) < 2:
+            raise ValueError("cannot delete the only remaining branch")
+        deleted_name = target.branch_name
+        deleted_id = target.session_id
+        self._store.delete(target)
+
+        remaining = self._store.list_by_binding(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+        )
+        if not remaining:
+            raise RuntimeError("no sibling left after delete; binding is empty")
+        remaining_ids = {item.session_id for item in remaining}
+        active = self._store.get_by_binding(
+            tenant_id=session.tenant_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            project=session.project,
+        )
+        # Legacy binding fallback may rebind a write_stopped parent; always
+        # pick an explicit survivor and ensure it can accept writes.
+        if active is None or active.session_id not in remaining_ids:
+            chosen = next(
+                (item for item in remaining if not item.write_stopped),
+                remaining[0],
+            )
+        else:
+            chosen = active
+        if chosen.write_stopped:
+            chosen = chosen.model_copy(
+                update={
+                    "write_stopped": False,
+                    "expires_at": datetime.now(timezone.utc) + self._session_ttl,
+                }
+            )
+            self._store.upsert(chosen)
+            self._emit_session_event(LifecycleEventType.SESSION_SAVED, chosen)
+        self._store.set_active_session(chosen)
+        self._emit_session_event(
+            LifecycleEventType.SESSION_LOADED,
+            chosen,
+            extra={
+                "deleted_branch": True,
+                "deleted_session_id": str(deleted_id),
+                "deleted_branch_name": deleted_name,
+            },
+        )
+        return chosen
+
+    def _require_sibling(
+        self,
+        session: ConversationSession,
+        target_session_id: UUID,
+    ) -> ConversationSession:
+        target = self._store.get(target_session_id)
+        if target is None:
+            raise KeyError(f"session not found: {target_session_id}")
+        if (
+            target.tenant_id != session.tenant_id
+            or target.chat_id != session.chat_id
+            or target.user_id != session.user_id
+            or target.project.tenant_id != session.project.tenant_id
+            or target.project.project_id != session.project.project_id
+        ):
+            raise ValueError("target session is not a sibling under this binding")
         return target
 
     def prepare_question(

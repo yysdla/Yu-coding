@@ -1019,6 +1019,22 @@ def render_context_preview_card(
                         "session_id": str(session_id),
                     },
                 },
+                *(
+                    [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "删除分支"},
+                            "type": "danger",
+                            "value": {
+                                "action": "context_delete_branch",
+                                "session_id": str(session_id),
+                                "target_session_id": str(session_id),
+                            },
+                        }
+                    ]
+                    if len(branch_rows) >= 2
+                    else []
+                ),
             ],
         },
     ]

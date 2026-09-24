@@ -617,6 +617,13 @@ class FeishuEventService:
                 background_tasks=background_tasks,
             )
 
+        if action_name == "context_delete_branch":
+            return self._handle_context_delete_branch(
+                value=value,
+                chat_id=chat_id,
+                background_tasks=background_tasks,
+            )
+
         if action_name == "context_open_date_window":
             return self._handle_context_open_date_window(
                 value=value,
@@ -1293,6 +1300,42 @@ class FeishuEventService:
             card=self._context_preview_card_payload(target),
             toast_type="info",
             toast_content=f"已切换到 {target.branch_name}",
+        )
+
+    def _handle_context_delete_branch(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> FeishuCallbackResult:
+        """删除指定分支（默认当前线），绑定切到剩余兄弟线；原卡片原地刷新。"""
+
+        session = self._require_pending_session(value, require_writable=False)
+        if session is None or not chat_id:
+            return FeishuCallbackResult(status="ignored")
+        target_raw = str(value.get("target_session_id") or session.session_id).strip()
+        try:
+            target_id = UUID(target_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid target_session_id") from None
+        deleted = self._conversation.store.get(target_id)
+        deleted_name = deleted.branch_name if deleted is not None else "?"
+        try:
+            survivor = self._conversation.delete_session(session, target_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if survivor.pending_send is None:
+            survivor = self._conversation.refresh_pending_send(
+                survivor, question="（删除分支后）"
+            )
+        return FeishuCallbackResult(
+            status="accepted",
+            card=self._context_preview_card_payload(survivor),
+            toast_type="info",
+            toast_content=f"已删除分支 {deleted_name}，当前 {survivor.branch_name}",
         )
 
     def _handle_context_open_date_window(

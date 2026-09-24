@@ -49,6 +49,11 @@ class ConversationStore:
     def upsert(self, session: ConversationSession) -> ConversationSession:
         raise NotImplementedError
 
+    def delete(self, session: ConversationSession) -> None:
+        """Remove a session row; clear binding if it was the active line."""
+
+        raise NotImplementedError
+
 
 def _binding_key(
     *,
@@ -148,12 +153,15 @@ class InMemoryConversationStore(ConversationStore):
             self._active_by_binding[key] = session.session_id
         return session
 
-    def _drop(self, session: ConversationSession) -> None:
+    def delete(self, session: ConversationSession) -> None:
         self._by_id.pop(session.session_id, None)
         key = _session_binding_key(session)
         current = self._active_by_binding.get(key)
         if current == session.session_id:
             self._active_by_binding.pop(key, None)
+
+    def _drop(self, session: ConversationSession) -> None:
+        self.delete(session)
 
 
 class SQLiteConversationStore(ConversationStore):
@@ -439,7 +447,7 @@ class SQLiteConversationStore(ConversationStore):
             return None
         return session
 
-    def _drop(self, session: ConversationSession) -> None:
+    def delete(self, session: ConversationSession) -> None:
         self._database.execute(
             "DELETE FROM conversation_sessions WHERE session_id = ?",
             (str(session.session_id),),
@@ -479,6 +487,9 @@ class SQLiteConversationStore(ConversationStore):
                     session.project.project_id,
                 ),
             )
+
+    def _drop(self, session: ConversationSession) -> None:
+        self.delete(session)
 
 
 def _migrate_conversation_sessions_v1(connection: sqlite3.Connection) -> None:
